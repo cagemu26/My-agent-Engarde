@@ -63,16 +63,16 @@ export default function History() {
       epee: "Épée",
       sabre: "Sabre"
     };
-    return labels[weapon.toLowerCase()] || weapon;
+    return labels[weapon?.toLowerCase()] || weapon;
   };
 
   const getWeaponColor = (weapon: string) => {
     const colors: Record<string, string> = {
-      foil: "#FF6B35",
-      epee: "#8B5CF6",
+      foil: "#F97316",
+      epee: "#DC2626",
       sabre: "#06B6D4"
     };
-    return colors[weapon.toLowerCase()] || "#6B7280";
+    return colors[weapon?.toLowerCase()] || "#6B7280";
   };
 
   const filteredVideos = selectedWeapon === "all"
@@ -80,60 +80,74 @@ export default function History() {
     : videos.filter(v => v.weapon.toLowerCase() === selectedWeapon.toLowerCase());
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-background overflow-hidden">
+      {/* Background Effects */}
+      <div className="fixed inset-0 -z-10 overflow-hidden">
+        <div className="absolute top-0 left-1/4 w-[500px] h-[500px] bg-red-500/5 rounded-full blur-[100px]"></div>
+        <div className="absolute bottom-0 right-1/4 w-[400px] h-[400px] bg-amber-500/5 rounded-full blur-[80px]"></div>
+      </div>
+
       {/* Navigation */}
-      <nav className="fixed top-0 left-0 right-0 z-50 border-b border-border/40 bg-background/80 backdrop-blur-md">
-        <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
-          <Link href="/" className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
-              <span className="text-primary-foreground font-bold text-sm">E</span>
+      <nav className="fixed top-0 left-0 right-0 z-50 glass border-b border-border/50">
+        <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
+          <Link href="/" className="flex items-center gap-3 group">
+            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-red-600 to-red-700 flex items-center justify-center shadow-lg shadow-red-500/30 group-hover:scale-105 transition-transform duration-300">
+              <span className="text-white font-bold text-lg">E</span>
             </div>
-            <span className="font-semibold text-lg">Engarde AI</span>
+            <div>
+              <span className="font-bold text-xl tracking-tight">Engarde</span>
+              <span className="font-bold text-xl text-red-600">AI</span>
+            </div>
           </Link>
-          <div className="flex items-center gap-6">
-            <Link href="/analyze" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+
+          <div className="hidden md:flex items-center gap-8">
+            <Link href="/analyze" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors hover-lift">
               Analyze
             </Link>
-            <Link href="/training" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+            <Link href="/training" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors hover-lift">
               Training
             </Link>
-            <Link href="/history" className="text-sm text-primary font-medium">
+            <Link href="/history" className="text-sm font-medium text-red-600 hover-lift">
               History
+            </Link>
+            <Link href="/demo" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors hover-lift">
+              Demo
             </Link>
           </div>
         </div>
       </nav>
 
       <main className="pt-32 pb-16">
-        <div className="max-w-4xl mx-auto px-6">
-          <div className="flex items-center justify-between mb-8">
+        <div className="max-w-6xl mx-auto px-6">
+          {/* Header */}
+          <div className="flex items-center justify-between mb-10">
             <div>
-              <h1 className="text-3xl font-bold mb-1">Analysis History</h1>
+              <h1 className="text-4xl font-bold mb-2">Analysis History</h1>
               <p className="text-muted-foreground">Review your past performances</p>
             </div>
             <div className="text-right">
               <p className="text-sm text-muted-foreground">Total Videos</p>
-              <p className="text-3xl font-bold text-primary">{videos.length}</p>
+              <p className="text-4xl font-bold gradient-text">{videos.length}</p>
             </div>
           </div>
 
           {/* Loading State */}
           {loading && (
-            <div className="flex items-center justify-center py-12">
-              <div className="flex flex-col items-center gap-3">
-                <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin"></div>
-                <p className="text-muted-foreground text-sm">Loading videos...</p>
+            <div className="flex items-center justify-center py-20">
+              <div className="flex flex-col items-center gap-4">
+                <div className="w-12 h-12 border-4 border-red-500 border-t-transparent rounded-full animate-spin"></div>
+                <p className="text-muted-foreground">Loading videos...</p>
               </div>
             </div>
           )}
 
           {/* Error State */}
           {error && (
-            <div className="mb-6 p-4 rounded-xl bg-red-500/10 border border-red-500/20">
-              <p className="text-red-500 text-sm">{error}</p>
+            <div className="mb-6 p-5 rounded-2xl bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
+              <p className="text-red-600 dark:text-red-400">{error}</p>
               <button
                 onClick={fetchVideos}
-                className="mt-2 text-sm text-red-500 hover:underline"
+                className="mt-3 text-sm text-red-600 hover:underline font-medium"
               >
                 Try again
               </button>
@@ -142,21 +156,24 @@ export default function History() {
 
           {/* Empty State */}
           {!loading && !error && videos.length === 0 && (
-            <div className="text-center py-12">
-              <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-secondary flex items-center justify-center">
-                <svg className="w-8 h-8 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <div className="text-center py-20 glass-card rounded-3xl">
+              <div className="w-20 h-20 mx-auto mb-6 rounded-2xl bg-red-100 dark:bg-red-900/30 flex items-center justify-center">
+                <svg className="w-10 h-10 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
                 </svg>
               </div>
-              <h3 className="text-lg font-semibold mb-2">No videos yet</h3>
-              <p className="text-muted-foreground text-sm mb-4">
-                Upload your first fencing video to start analyzing
+              <h3 className="text-xl font-bold mb-2">No videos yet</h3>
+              <p className="text-muted-foreground mb-6 max-w-sm mx-auto">
+                Upload your first fencing video to start analyzing your technique
               </p>
               <Link
                 href="/analyze"
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
+                className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-gradient-to-r from-red-600 to-red-700 text-white font-medium hover:shadow-lg hover:shadow-red-500/30 hover-lift transition-all"
               >
                 Upload Video
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
+                </svg>
               </Link>
             </div>
           )}
@@ -164,43 +181,43 @@ export default function History() {
           {/* Filters */}
           {!loading && !error && videos.length > 0 && (
             <>
-              <div className="flex gap-3 mb-6">
+              <div className="flex gap-3 mb-8">
                 <button
                   onClick={() => setSelectedWeapon("all")}
-                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  className={`px-5 py-2.5 rounded-xl font-medium text-sm transition-all duration-300 ${
                     selectedWeapon === "all"
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-card border border-border hover:bg-secondary"
+                      ? "bg-gradient-to-r from-red-600 to-red-700 text-white shadow-lg shadow-red-500/30"
+                      : "bg-card border border-border hover:border-red-300"
                   }`}
                 >
                   All
                 </button>
                 <button
                   onClick={() => setSelectedWeapon("foil")}
-                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  className={`px-5 py-2.5 rounded-xl font-medium text-sm transition-all duration-300 ${
                     selectedWeapon === "foil"
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-card border border-border hover:bg-secondary"
+                      ? "bg-gradient-to-r from-orange-500 to-orange-600 text-white shadow-lg shadow-orange-500/30"
+                      : "bg-card border border-border hover:border-orange-300"
                   }`}
                 >
                   Foil
                 </button>
                 <button
                   onClick={() => setSelectedWeapon("epee")}
-                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  className={`px-5 py-2.5 rounded-xl font-medium text-sm transition-all duration-300 ${
                     selectedWeapon === "epee"
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-card border border-border hover:bg-secondary"
+                      ? "bg-gradient-to-r from-red-600 to-red-700 text-white shadow-lg shadow-red-500/30"
+                      : "bg-card border border-border hover:border-red-300"
                   }`}
                 >
                   Épée
                 </button>
                 <button
                   onClick={() => setSelectedWeapon("sabre")}
-                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  className={`px-5 py-2.5 rounded-xl font-medium text-sm transition-all duration-300 ${
                     selectedWeapon === "sabre"
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-card border border-border hover:bg-secondary"
+                      ? "bg-gradient-to-r from-cyan-500 to-cyan-600 text-white shadow-lg shadow-cyan-500/30"
+                      : "bg-card border border-border hover:border-cyan-300"
                   }`}
                 >
                   Sabre
@@ -208,29 +225,29 @@ export default function History() {
               </div>
 
               {/* History List */}
-              <div className="space-y-3">
+              <div className="space-y-4">
                 {filteredVideos.map((video) => (
                   <Link
                     key={video.video_id}
                     href={`/history/${video.video_id}`}
-                    className="block"
+                    className="block group"
                   >
-                    <div className="p-5 rounded-2xl bg-card border border-border hover:border-primary/30 transition-colors cursor-pointer">
+                    <div className="glass-card p-5 rounded-2xl hover-lift transition-all duration-300 cursor-pointer">
                       <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-4">
+                        <div className="flex items-center gap-5">
                           <div
-                            className="w-14 h-14 rounded-xl flex items-center justify-center"
+                            className="w-16 h-16 rounded-2xl flex items-center justify-center shadow-lg"
                             style={{ backgroundColor: `${getWeaponColor(video.weapon)}20` }}
                           >
-                            <svg className="w-7 h-7" fill="none" viewBox="0 0 24 24" stroke={getWeaponColor(video.weapon)}>
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                            <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke={getWeaponColor(video.weapon)} strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
                             </svg>
                           </div>
                           <div>
-                            <h3 className="font-semibold">{video.title || "Untitled Video"}</h3>
-                            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                            <h3 className="font-semibold text-lg group-hover:text-red-600 transition-colors">{video.title || "Untitled Video"}</h3>
+                            <div className="flex items-center gap-3 text-sm text-muted-foreground mt-1">
                               <span
-                                className="px-2 py-0.5 rounded-full text-xs font-medium"
+                                className="px-2.5 py-0.5 rounded-full text-xs font-medium"
                                 style={{
                                   backgroundColor: `${getWeaponColor(video.weapon)}20`,
                                   color: getWeaponColor(video.weapon)
@@ -249,23 +266,26 @@ export default function History() {
                             </div>
                           </div>
                         </div>
-                        <div className="text-right">
+                        <div className="flex items-center gap-4">
                           {video.match_result && (
-                            <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
+                            <span className={`px-3 py-1.5 rounded-full text-xs font-semibold ${
                               video.match_result === "win"
-                                ? "bg-green-500/10 text-green-500"
+                                ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
                                 : video.match_result === "loss"
-                                ? "bg-red-500/10 text-red-500"
-                                : "bg-yellow-500/10 text-yellow-500"
+                                ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                                : "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400"
                             }`}>
                               {video.match_result === "win" ? "Win" : video.match_result === "loss" ? "Loss" : "Draw"}
                             </span>
                           )}
                           {video.score && (
-                            <p className="text-sm text-muted-foreground mt-1">
-                              Score: {video.score}
+                            <p className="text-sm font-mono font-semibold text-muted-foreground">
+                              {video.score}
                             </p>
                           )}
+                          <svg className="w-5 h-5 text-muted-foreground group-hover:translate-x-1 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                          </svg>
                         </div>
                       </div>
                     </div>
