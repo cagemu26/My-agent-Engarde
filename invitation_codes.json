@@ -1,0 +1,14 @@
+[
+  {
+    "code": "FENCING2025",
+    "expires_at": "2026-12-31T23:59:59Z"
+  },
+  {
+    "code": "ENGARDE-ALPHA",
+    "expires_at": "2026-06-30T23:59:59Z"
+  },
+  {
+    "code": "TEST-INVITE",
+    "expires_at": "2026-12-31T23:59:59Z"
+  }
+]

@@ -13,3 +13,6 @@ mediapipe==0.10.9
 opencv-python-headless==4.9.0.80
 numpy==1.26.3
 pillow==10.2.0
+bcrypt==4.1.2
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4

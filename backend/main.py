@@ -6,6 +6,9 @@ from app.core.config import settings
 from app.api.routers import health
 from app.services.llm import router as llm_router
 from app.api.routers.video import router as video_router
+from app.api.routers.auth import router as auth_router
+from app.api.routers.admin import router as admin_router
+from app.api.routers.feedback import router as feedback_router
 
 app = FastAPI(
     title="Engarde AI API",
@@ -24,6 +27,9 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(llm_router)
 app.include_router(video_router, prefix="/video")
+app.include_router(auth_router)
+app.include_router(admin_router)
+app.include_router(feedback_router)
 
 # Video directory
 VIDEO_DIR = Path(settings.VIDEO_UPLOAD_DIR)

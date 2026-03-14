@@ -1,6 +1,10 @@
+"use client";
+
 import Link from "next/link";
+import { useAuth } from "@/lib/auth";
 
 export default function Home() {
+  const { user, logout, isLoading } = useAuth();
   return (
     <div className="min-h-screen bg-background overflow-hidden">
       {/* Animated Background */}
@@ -45,18 +49,46 @@ export default function Home() {
             <Link href="/demo" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors hover-lift">
               Demo
             </Link>
+            <Link href="/feedback" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors hover-lift">
+              Feedback
+            </Link>
+            {user?.is_admin && (
+              <Link href="/admin" className="text-sm font-medium text-red-600 hover:text-red-700 transition-colors hover-lift">
+                Admin
+              </Link>
+            )}
           </div>
 
           <div className="flex items-center gap-3">
-            <Link
-              href="/analyze"
-              className="hidden sm:flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-red-600 to-red-700 text-white font-medium hover:shadow-lg hover:shadow-red-500/30 hover-lift transition-all duration-300"
-            >
-              Get Started
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
-              </svg>
-            </Link>
+            {user ? (
+              <>
+                <span className="text-sm text-muted-foreground">{user.username}</span>
+                <button
+                  onClick={logout}
+                  className="hidden sm:flex items-center gap-2 px-5 py-2.5 rounded-xl border border-red-200 text-red-600 font-medium hover:bg-red-50 hover-lift transition-all duration-300"
+                >
+                  Logout
+                </button>
+              </>
+            ) : (
+              <>
+                <Link
+                  href="/login"
+                  className="hidden sm:flex items-center gap-2 px-5 py-2.5 rounded-xl text-muted-foreground font-medium hover:text-foreground transition-colors"
+                >
+                  Login
+                </Link>
+                <Link
+                  href="/register"
+                  className="hidden sm:flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-red-600 to-red-700 text-white font-medium hover:shadow-lg hover:shadow-red-500/30 hover-lift transition-all duration-300"
+                >
+                  Get Started
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
+                  </svg>
+                </Link>
+              </>
+            )}
           </div>
         </div>
       </nav>
