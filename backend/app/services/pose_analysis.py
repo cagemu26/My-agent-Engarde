@@ -4,12 +4,10 @@ Pose Analysis Service using MediaPipe.
 This service provides human pose detection and visualization for fencing videos.
 """
 
-import os
 import json
 import cv2
-import numpy as np
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 from datetime import datetime
 import mediapipe as mp
 from mediapipe.framework.formats import landmark_pb2
@@ -19,6 +17,7 @@ from app.core.config import settings
 
 class PoseAnalysisService:
     """Service for detecting and analyzing human pose in videos."""
+    FIXED_SAMPLE_INTERVAL = 1
 
     # MediaPipe Pose landmark indices
     # https://google.github.io/mediapipe/solutions/pose.html
@@ -99,7 +98,7 @@ class PoseAnalysisService:
         self,
         video_path: str,
         video_id: str,
-        sample_interval: int = 5
+        sample_interval: int = 1
     ) -> Dict[str, Any]:
         """
         Analyze pose in a video file.
@@ -107,7 +106,7 @@ class PoseAnalysisService:
         Args:
             video_path: Path to the video file
             video_id: Unique identifier for the video
-            sample_interval: Process every N frames (default 5 for performance)
+            sample_interval: Deprecated, sampling is fixed to every frame for best quality.
 
         Returns:
             Dictionary containing analysis results and paths
@@ -133,13 +132,15 @@ class PoseAnalysisService:
             print(f"Processing video: {video_path}")
             print(f"Total frames: {frame_count}, FPS: {fps}, Duration: {duration:.2f}s")
 
+            effective_interval = self.FIXED_SAMPLE_INTERVAL
+
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret:
                     break
 
                 # Process every Nth frame
-                if frame_idx % sample_interval == 0:
+                if frame_idx % effective_interval == 0:
                     # Convert to RGB for MediaPipe
                     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
@@ -189,7 +190,7 @@ class PoseAnalysisService:
                 "duration": duration
             },
             "processing": {
-                "sample_interval": sample_interval,
+                "sample_interval": effective_interval,
                 "processed_frames": processed_frames,
                 "total_frames": frame_count
             },
@@ -308,55 +309,6 @@ class PoseAnalysisService:
         if overlay_path.exists():
             return str(overlay_path)
         return None
-
-    def compute_fencing_metrics(self, pose_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Compute fencing-specific metrics from pose data.
-
-        Args:
-            pose_data: The pose analysis data
-
-        Returns:
-            Dictionary with computed metrics
-        """
-        pose_sequence = pose_data.get("pose_sequence", [])
-        if not pose_sequence:
-            return {}
-
-        metrics = {
-            "frame_count": len(pose_sequence),
-            "avg_visibility": 0,
-            "movement_metrics": {}
-        }
-
-        # Compute average visibility
-        all_visibilities = []
-        for frame in pose_sequence:
-            for lm in frame.get("landmarks", []):
-                all_visibilities.append(lm.get("visibility", 0))
-
-        if all_visibilities:
-            metrics["avg_visibility"] = sum(all_visibilities) / len(all_visibilities)
-
-        # Compute movement metrics (simplified)
-        # Calculate vertical movement (likely lunging)
-        if len(pose_sequence) >= 2:
-            shoulder_y_values = []
-            ankle_y_values = []
-
-            for frame in pose_sequence:
-                # Find left shoulder (index 11) and right shoulder (index 12)
-                for lm in frame.get("landmarks", []):
-                    if lm.get("name") == "left_shoulder":
-                        shoulder_y_values.append(lm.get("y", 0))
-                    elif lm.get("name") == "left_ankle":
-                        ankle_y_values.append(lm.get("y", 0))
-
-            if shoulder_y_values:
-                metrics["movement_metrics"]["vertical_range"] = max(shoulder_y_values) - min(shoulder_y_values)
-
-        return metrics
-
 
 # Singleton instance
 pose_analysis_service = PoseAnalysisService()

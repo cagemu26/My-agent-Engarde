@@ -10,8 +10,22 @@ const geistSans = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "Engarde AI | Fencing Intelligence",
-  description: "AI-powered fencing training and analysis platform",
+  title: "Engarde AI | Train from footage. Compete with clarity.",
+  description: "Engarde AI turns bout video into technical corrections, tactical review, and drill-ready next steps.",
+  icons: {
+    icon: [
+      { url: "/brand/logo-mark.svg", type: "image/svg+xml" },
+      { url: "/favicon.ico", type: "image/x-icon", sizes: "any" },
+    ],
+    shortcut: [{ url: "/favicon.ico", type: "image/x-icon" }],
+    apple: [{ url: "/brand/logo-mark.svg", type: "image/svg+xml" }],
+  },
+  openGraph: {
+    type: "website",
+    title: "Engarde AI | Train from footage. Compete with clarity.",
+    description: "Engarde AI turns bout video into technical corrections, tactical review, and drill-ready next steps.",
+    siteName: "Engarde AI",
+  },
 };
 
 export default function RootLayout({

@@ -1,6 +1,7 @@
 "use client";
 
 import { createContext, useContext, useState, useEffect, ReactNode } from "react";
+import { buildApiUrl } from "@/lib/api";
 
 interface User {
   id: string;
@@ -23,8 +24,6 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
@@ -43,7 +42,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const login = async (email: string, password: string) => {
-    const response = await fetch(`${API_URL}/api/auth/login`, {
+    const response = await fetch(buildApiUrl("/api/auth/login"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -64,7 +63,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const register = async (email: string, username: string, password: string, invitationCode: string) => {
-    const response = await fetch(`${API_URL}/api/auth/register`, {
+    const response = await fetch(buildApiUrl("/api/auth/register"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

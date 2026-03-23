@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field, ConfigDict
+from typing import Any, Optional
 from datetime import datetime
 from enum import Enum
 
@@ -21,14 +21,68 @@ class ChatMessage(BaseModel):
     content: str
 
 
+class KBFilter(BaseModel):
+    weapon: Optional[str] = None
+    topic: Optional[str] = None
+    level: Optional[str] = None
+    language: Optional[str] = None
+
+
+class Citation(BaseModel):
+    chunk_id: str
+    doc_id: str
+    title: str
+    source: str
+    snippet: str
+    score: float
+
+
+class RetrievalMeta(BaseModel):
+    use_kb: bool = False
+    provider: Optional[str] = None
+    collection: Optional[str] = None
+    hit_count: int = 0
+    degraded: bool = False
+    degrade_reason: Optional[str] = None
+
+
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     context: Optional[str] = None  # Optional video analysis context
+    video_id: Optional[str] = None
+    weapon: Optional[str] = None
+    use_kb: bool = False
+    kb_filters: Optional[KBFilter] = None
 
 
 class ChatResponse(BaseModel):
     message: str
     sources: Optional[list[str]] = None
+    citations: Optional[list[Citation]] = None
+    retrieval_meta: Optional[RetrievalMeta] = None
+
+
+class KBIngestRequest(BaseModel):
+    path: Optional[str] = None
+    reindex: bool = False
+
+
+class KBIngestResponse(BaseModel):
+    message: str
+    stats: dict[str, Any]
+
+
+class KBSearchRequest(BaseModel):
+    query: str
+    top_k: int = Field(default=6, ge=1, le=20)
+    kb_filters: Optional[KBFilter] = None
+
+
+class KBSearchResponse(BaseModel):
+    query: str
+    total: int
+    hits: list[Citation]
+    retrieval_meta: RetrievalMeta
 
 
 # Video metadata schema
@@ -49,11 +103,6 @@ class VideoUploadResponse(BaseModel):
     filename: str
     file_path: str
     message: str
-
-
-class VideoUploadWithMetadataRequest(BaseModel):
-    """Request body for uploading video with metadata"""
-    metadata: VideoMetadata
 
 
 class VideoAnalyzeRequest(BaseModel):
@@ -123,7 +172,7 @@ class PoseAnalysisData(BaseModel):
 class PoseAnalyzeRequest(BaseModel):
     """Request to analyze pose in a video"""
     video_id: str
-    sample_interval: Optional[int] = 5  # Process every N frames
+    sample_interval: Optional[int] = 1  # Deprecated, ignored by backend (fixed high-quality sampling)
 
 
 class PoseAnalyzeResponse(BaseModel):
@@ -142,8 +191,19 @@ class PoseOverlayResponse(BaseModel):
     message: str
 
 
-class FencingMetrics(BaseModel):
-    """Fencing-specific metrics computed from pose data"""
-    frame_count: int
-    avg_visibility: float
-    movement_metrics: dict
+class AnalysisReportResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    report_id: str
+    video_id: str
+    report: str
+    summary: str
+    status: str
+    model_name: str
+    prompt_version: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class AnalysisReportGenerateResponse(AnalysisReportResponse):
+    cached: bool = False

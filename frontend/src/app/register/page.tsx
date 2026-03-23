@@ -2,10 +2,8 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { buildApiUrl } from "@/lib/api";
 
 export default function RegisterPage() {
   const [email, setEmail] = useState("");
@@ -18,7 +16,6 @@ export default function RegisterPage() {
   const [verifying, setVerifying] = useState(false);
   const [registered, setRegistered] = useState(false);
   const { register } = useAuth();
-  const router = useRouter();
 
   const verifyCode = async () => {
     if (!invitationCode.trim()) {
@@ -30,7 +27,7 @@ export default function RegisterPage() {
     setError("");
 
     try {
-      const response = await fetch(`${API_URL}/api/auth/codes/verify/${invitationCode}`);
+      const response = await fetch(buildApiUrl(`/api/auth/codes/verify/${invitationCode}`));
       const data = await response.json();
 
       if (data.valid) {
@@ -39,7 +36,7 @@ export default function RegisterPage() {
         setError(data.message || "Invalid invitation code");
         setCodeVerified(false);
       }
-    } catch (err) {
+    } catch {
       setError("Failed to verify invitation code");
       setCodeVerified(false);
     } finally {
@@ -107,7 +104,7 @@ export default function RegisterPage() {
               </div>
               <h2 className="text-2xl font-bold mb-2">Check Your Email</h2>
               <p className="text-muted-foreground mb-2">
-                We've sent a verification link to
+                We&apos;ve sent a verification link to
               </p>
               <p className="font-medium text-foreground mb-6">{email}</p>
               <p className="text-sm text-muted-foreground mb-6">

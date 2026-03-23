@@ -67,9 +67,15 @@ def create_feedback(
     db: Session = Depends(get_db)
 ):
     """Submit user feedback."""
+    if not current_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to submit feedback",
+        )
+
     feedback = Feedback(
-        user_id=current_user.id if current_user else None,
-        user_email=request.user_email or (current_user.email if current_user else None),
+        user_id=current_user.id,
+        user_email=current_user.email,
         category=request.category,
         title=request.title,
         content=request.content,

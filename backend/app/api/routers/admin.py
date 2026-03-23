@@ -1,12 +1,21 @@
 from datetime import datetime, timedelta
 from typing import Optional, List, Any
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, field_validator
 from app.core.database import get_db
 from app.core.auth import verify_token
 from app.models import User, InvitationCode
+from app.schemas import (
+    KBIngestRequest,
+    KBIngestResponse,
+    KBSearchRequest,
+    KBSearchResponse,
+    Citation,
+    RetrievalMeta,
+)
+from app.services.rag import rag_service
 import secrets
 import uuid
 
@@ -254,3 +263,67 @@ def delete_invitation(
     db.delete(invitation)
     db.commit()
     return {"message": "Invitation code deleted successfully"}
+
+
+@router.post("/kb/ingest", response_model=KBIngestResponse)
+async def ingest_knowledge_base(
+    request: KBIngestRequest = Body(default_factory=KBIngestRequest),
+    current_admin: User = Depends(get_current_admin),
+):
+    """Ingest knowledge documents into vector storage."""
+    try:
+        stats = await rag_service.ingest_knowledge(
+            data_dir=request.path,
+            reindex=request.reindex,
+        )
+        return KBIngestResponse(
+            message="Knowledge base ingestion completed",
+            stats=stats,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"KB ingest failed: {exc}",
+        )
+
+
+@router.post("/kb/reindex", response_model=KBIngestResponse)
+async def reindex_knowledge_base(
+    request: KBIngestRequest = Body(default_factory=KBIngestRequest),
+    current_admin: User = Depends(get_current_admin),
+):
+    """Rebuild knowledge base index from source files."""
+    try:
+        stats = await rag_service.ingest_knowledge(
+            data_dir=request.path,
+            reindex=True,
+        )
+        return KBIngestResponse(
+            message="Knowledge base reindex completed",
+            stats=stats,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"KB reindex failed: {exc}",
+        )
+
+
+@router.post("/kb/search", response_model=KBSearchResponse)
+async def search_knowledge_base(
+    request: KBSearchRequest,
+    current_admin: User = Depends(get_current_admin),
+):
+    """Run retrieval-only query against knowledge base."""
+    filters = request.kb_filters.model_dump(exclude_none=True) if request.kb_filters else {}
+    hits, retrieval_meta = await rag_service.search_knowledge(
+        query=request.query,
+        top_k=request.top_k,
+        kb_filters=filters,
+    )
+    return KBSearchResponse(
+        query=request.query,
+        total=len(hits),
+        hits=[Citation(**item) for item in hits],
+        retrieval_meta=RetrievalMeta(**retrieval_meta),
+    )

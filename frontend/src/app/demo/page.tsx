@@ -1,7 +1,9 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import Link from "next/link";
+import { buildApiUrl } from "@/lib/api";
+import { TopNav } from "@/components/top-nav";
 
 const POSE_CONNECTIONS = [
   [11, 12], [11, 13], [13, 15], [12, 14], [14, 16],
@@ -18,6 +20,13 @@ const KEY_POINT_NAMES: Record<number, string> = {
 };
 
 const DEMO_VIDEO_ID = "3f7c31ce-f491-4e0f-b787-2f8a57d58560";
+
+const DEMO_NAV_LINKS = [
+  { href: "/analyze", label: "Analyze" },
+  { href: "/training", label: "Training" },
+  { href: "/feedback", label: "Feedback" },
+  { href: "/admin", label: "Admin", adminOnly: true },
+] as const;
 
 interface PoseFrame {
   frame_index: number;
@@ -61,28 +70,7 @@ export default function Demo() {
     }
   }, [showOverlay, poseData]);
 
-  useEffect(() => {
-    if (showOverlay && poseData && canvasRef.current && currentFrame < poseData.pose_sequence.length) {
-      drawSkeleton();
-    }
-  }, [showOverlay, currentFrame, poseData]);
-
-  const fetchPoseData = async () => {
-    try {
-      setLoading(true);
-      const response = await fetch(`http://localhost:8000/video/${DEMO_VIDEO_ID}/pose-data`);
-      if (response.ok) {
-        const data = await response.json();
-        setPoseData(data);
-      }
-    } catch (error) {
-      console.error("Failed to fetch pose data:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const drawSkeleton = () => {
+  const drawSkeleton = useCallback(() => {
     const canvas = canvasRef.current;
     const video = videoRef.current;
     if (!canvas || !video || !poseData || currentFrame >= poseData.pose_sequence.length) return;
@@ -116,7 +104,7 @@ export default function Demo() {
     });
 
     Object.entries(KEY_POINT_NAMES).forEach(([idx, name]) => {
-      const index = parseInt(idx);
+      const index = parseInt(idx, 10);
       if (index < frame.landmarks.length) {
         const point = frame.landmarks[index];
         if (point.visibility > 0.3) {
@@ -140,6 +128,27 @@ export default function Demo() {
     ctx.fillStyle = '#FFFFFF';
     ctx.font = '12px monospace';
     ctx.fillText(`Frame: ${currentFrame}/${poseData.pose_sequence.length - 1}`, 20, canvas.height - 17);
+  }, [currentFrame, poseData]);
+
+  useEffect(() => {
+    if (showOverlay && poseData && canvasRef.current && currentFrame < poseData.pose_sequence.length) {
+      drawSkeleton();
+    }
+  }, [showOverlay, currentFrame, poseData, drawSkeleton]);
+
+  const fetchPoseData = async () => {
+    try {
+      setLoading(true);
+      const response = await fetch(buildApiUrl(`/video/${DEMO_VIDEO_ID}/pose-data`));
+      if (response.ok) {
+        const data = await response.json();
+        setPoseData(data);
+      }
+    } catch (error) {
+      console.error("Failed to fetch pose data:", error);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -150,35 +159,7 @@ export default function Demo() {
         <div className="absolute bottom-0 right-1/4 w-[400px] h-[400px] bg-amber-500/5 rounded-full blur-[80px]"></div>
       </div>
 
-      {/* Navigation */}
-      <nav className="fixed top-0 left-0 right-0 z-50 glass border-b border-border/50">
-        <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
-          <Link href="/" className="flex items-center gap-3 group">
-            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-red-600 to-red-700 flex items-center justify-center shadow-lg shadow-red-500/30 group-hover:scale-105 transition-transform duration-300">
-              <span className="text-white font-bold text-lg">E</span>
-            </div>
-            <div>
-              <span className="font-bold text-xl tracking-tight">Engarde</span>
-              <span className="font-bold text-xl text-red-600">AI</span>
-            </div>
-          </Link>
-
-          <div className="hidden md:flex items-center gap-8">
-            <Link href="/analyze" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors hover-lift">
-              Analyze
-            </Link>
-            <Link href="/training" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors hover-lift">
-              Training
-            </Link>
-            <Link href="/history" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors hover-lift">
-              History
-            </Link>
-            <Link href="/demo" className="text-sm font-medium text-red-600 hover-lift">
-              Demo
-            </Link>
-          </div>
-        </div>
-      </nav>
+      <TopNav activeHref="/demo" links={[...DEMO_NAV_LINKS]} />
 
       <main className="pt-32 pb-16">
         <div className="max-w-6xl mx-auto px-6">
@@ -198,7 +179,7 @@ export default function Demo() {
               controls
               preload="metadata"
             >
-              <source src={`http://localhost:8000/video/${DEMO_VIDEO_ID}`} type="video/mp4" />
+              <source src={buildApiUrl(`/video/${DEMO_VIDEO_ID}`)} type="video/mp4" />
               Your browser does not support the video tag.
             </video>
 

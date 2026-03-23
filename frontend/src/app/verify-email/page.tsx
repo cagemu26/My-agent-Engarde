@@ -1,29 +1,25 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
+import { buildApiUrl } from "@/lib/api";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
-export default function VerifyEmailPage() {
+function VerifyEmailContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const token = searchParams.get("token");
   const [status, setStatus] = useState<"loading" | "success" | "error">("loading");
   const [message, setMessage] = useState("");
 
-  useEffect(() => {
-    if (token) {
-      verifyEmail();
-    } else {
+  const verifyEmail = useCallback(async () => {
+    if (!token) {
       setStatus("error");
       setMessage("Invalid verification token");
+      return;
     }
-  }, [token]);
 
-  const verifyEmail = async () => {
     try {
-      const response = await fetch(`${API_URL}/api/auth/verify/${token}`);
+      const response = await fetch(buildApiUrl(`/api/auth/verify/${token}`));
       const data = await response.json();
 
       if (response.ok && data.success) {
@@ -33,11 +29,20 @@ export default function VerifyEmailPage() {
         setStatus("error");
         setMessage(data.message || "Verification failed");
       }
-    } catch (err) {
+    } catch {
       setStatus("error");
       setMessage("An error occurred during verification");
     }
-  };
+  }, [token]);
+
+  useEffect(() => {
+    if (token) {
+      verifyEmail();
+    } else {
+      setStatus("error");
+      setMessage("Invalid verification token");
+    }
+  }, [token, verifyEmail]);
 
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-4">
@@ -96,5 +101,19 @@ export default function VerifyEmailPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function VerifyEmailPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-background flex items-center justify-center p-4">
+          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-red-600" />
+        </div>
+      }
+    >
+      <VerifyEmailContent />
+    </Suspense>
   );
 }

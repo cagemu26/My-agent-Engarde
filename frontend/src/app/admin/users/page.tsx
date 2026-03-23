@@ -1,11 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { buildApiUrl } from "@/lib/api";
 
 interface User {
   id: string;
@@ -30,15 +29,10 @@ export default function UsersPage() {
     }
   }, [user, isLoading, router]);
 
-  useEffect(() => {
-    if (user && user.is_admin && token) {
-      fetchUsers();
-    }
-  }, [user, token]);
-
-  const fetchUsers = async () => {
+  const fetchUsers = useCallback(async () => {
+    if (!token) return;
     try {
-      const response = await fetch(`${API_URL}/api/admin/users`, {
+      const response = await fetch(buildApiUrl("/api/admin/users"), {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -53,11 +47,17 @@ export default function UsersPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [token]);
+
+  useEffect(() => {
+    if (user && user.is_admin && token) {
+      fetchUsers();
+    }
+  }, [user, token, fetchUsers]);
 
   const toggleUser = async (userId: string) => {
     try {
-      const response = await fetch(`${API_URL}/api/admin/users/${userId}/toggle`, {
+      const response = await fetch(buildApiUrl(`/api/admin/users/${userId}/toggle`), {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -69,7 +69,7 @@ export default function UsersPage() {
       }
       setSuccess("User status updated successfully");
       setTimeout(() => setSuccess(""), 3000);
-      fetchUsers();
+      await fetchUsers();
     } catch (err) {
       setError(err instanceof Error ? err.message : "An error occurred");
       setTimeout(() => setError(""), 3000);

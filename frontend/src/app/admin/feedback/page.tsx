@@ -1,11 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { buildApiUrl } from "@/lib/api";
 
 interface Feedback {
   id: string;
@@ -32,17 +31,13 @@ export default function FeedbackAdminPage() {
     }
   }, [user, isLoading, router]);
 
-  useEffect(() => {
-    if (user && user.is_admin && token) {
-      fetchFeedbacks();
-    }
-  }, [user, token, filter]);
-
-  const fetchFeedbacks = async () => {
+  const fetchFeedbacks = useCallback(async () => {
+    if (!token) return;
     try {
-      const url = filter === "all"
-        ? `${API_URL}/api/feedback`
-        : `${API_URL}/api/feedback?status_filter=${filter}`;
+      const url =
+        filter === "all"
+          ? buildApiUrl("/api/feedback")
+          : buildApiUrl(`/api/feedback?status_filter=${filter}`);
 
       const response = await fetch(url, {
         headers: {
@@ -59,11 +54,17 @@ export default function FeedbackAdminPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [filter, token]);
+
+  useEffect(() => {
+    if (user && user.is_admin && token) {
+      fetchFeedbacks();
+    }
+  }, [user, token, fetchFeedbacks]);
 
   const updateStatus = async (feedbackId: string, status: string) => {
     try {
-      const response = await fetch(`${API_URL}/api/feedback/${feedbackId}`, {
+      const response = await fetch(buildApiUrl(`/api/feedback/${feedbackId}`), {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
@@ -74,7 +75,7 @@ export default function FeedbackAdminPage() {
       if (!response.ok) {
         throw new Error("Failed to update feedback");
       }
-      fetchFeedbacks();
+      await fetchFeedbacks();
     } catch (err) {
       setError(err instanceof Error ? err.message : "An error occurred");
     }
@@ -84,7 +85,7 @@ export default function FeedbackAdminPage() {
     if (!confirm("Are you sure you want to delete this feedback?")) return;
 
     try {
-      const response = await fetch(`${API_URL}/api/feedback/${feedbackId}`, {
+      const response = await fetch(buildApiUrl(`/api/feedback/${feedbackId}`), {
         method: "DELETE",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -93,7 +94,7 @@ export default function FeedbackAdminPage() {
       if (!response.ok) {
         throw new Error("Failed to delete feedback");
       }
-      fetchFeedbacks();
+      await fetchFeedbacks();
     } catch (err) {
       setError(err instanceof Error ? err.message : "An error occurred");
     }

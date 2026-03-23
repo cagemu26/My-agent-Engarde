@@ -1,23 +1,30 @@
-import json
-from fastapi import APIRouter, UploadFile, File, HTTPException
+import mimetypes
+from typing import Optional
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, status
+from fastapi.responses import FileResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from sqlalchemy.orm import Session
 from app.schemas import (
     VideoUploadResponse,
-    VideoUploadWithMetadataRequest,
     VideoAnalyzeRequest,
     VideoAnalyzeResponse,
     VideoListResponse,
-    WeaponType,
     PoseAnalyzeRequest,
     PoseAnalyzeResponse,
     PoseOverlayResponse,
-    FencingMetrics,
+    AnalysisReportResponse,
+    AnalysisReportGenerateResponse,
 )
 from app.services.video import video_service
 from app.services.pose_analysis import pose_analysis_service
-from app.services.llm import llm_service
+from app.services.analysis_report import analysis_report_service
+from app.core.database import get_db
+from app.core.auth import verify_token
+from app.models import User
 
 
 router = APIRouter(tags=["video"])
+security_optional = HTTPBearer(auto_error=False)
 
 
 ALLOWED_VIDEO_TYPES = {
@@ -26,12 +33,84 @@ ALLOWED_VIDEO_TYPES = {
     "video/x-msvideo",
     "video/webm",
 }
+ALLOWED_VIDEO_EXTENSIONS = {
+    ".mp4",
+    ".mov",
+    ".avi",
+    ".webm",
+}
 
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 
 
+def get_current_user_optional(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_optional),
+    access_token: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+) -> Optional[User]:
+    """Resolve current user from Bearer token or access_token query parameter."""
+    token = credentials.credentials if credentials else access_token
+    if not token:
+        return None
+
+    payload = verify_token(token)
+    if payload is None:
+        return None
+
+    user_id = payload.get("sub")
+    if user_id is None:
+        return None
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None or not user.is_active:
+        return None
+    return user
+
+
+def get_current_user_required(
+    current_user: Optional[User] = Depends(get_current_user_optional),
+) -> User:
+    if not current_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+        )
+    return current_user
+
+
+def ensure_video_access(video_id: str, current_user: Optional[User]) -> dict:
+    """Ensure the request can access video resources tied to an owner account."""
+    metadata = video_service.get_video_metadata(video_id)
+    if not metadata:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    owner_id = metadata.get("user_id")
+    if owner_id:
+        if not current_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required",
+            )
+        if str(current_user.id) != str(owner_id) and not current_user.is_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have access to this video",
+            )
+
+    return metadata
+
+
+def is_allowed_video_upload(file: UploadFile) -> bool:
+    extension = (file.filename or "").lower()
+    extension = extension[extension.rfind("."):] if "." in extension else ""
+    return file.content_type in ALLOWED_VIDEO_TYPES or extension in ALLOWED_VIDEO_EXTENSIONS
+
+
 @router.post("/upload", response_model=VideoUploadResponse)
-async def upload_video(file: UploadFile = File(...)):
+async def upload_video(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user_required),
+):
     """
     Upload a video file for analysis.
 
@@ -39,15 +118,25 @@ async def upload_video(file: UploadFile = File(...)):
     Max file size: 100MB
     """
     # Validate file type
-    if file.content_type not in ALLOWED_VIDEO_TYPES:
+    if not is_allowed_video_upload(file):
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid file type. Allowed: {', '.join(ALLOWED_VIDEO_TYPES)}"
+            detail="Invalid file type. Allowed: MP4, MOV, AVI, WebM"
         )
 
     # Save the video (size check is done in video_service)
     try:
-        video_id, filename, file_path = await video_service.save_video(file, max_size=MAX_FILE_SIZE)
+        metadata = {
+            "title": file.filename,
+            "athlete": "",
+            "opponent": "",
+            "weapon": "epee",
+            "match_result": "",
+            "score": "",
+            "tournament": "",
+            "user_id": str(current_user.id),
+        }
+        video_id, filename, file_path = await video_service.save_video(file, metadata=metadata, max_size=MAX_FILE_SIZE)
 
         return VideoUploadResponse(
             video_id=video_id,
@@ -74,6 +163,7 @@ async def upload_video_with_metadata(
     match_result: str = File(""),
     score: str = File(""),
     tournament: str = File(""),
+    current_user: User = Depends(get_current_user_required),
 ):
     """
     Upload a video file with metadata.
@@ -89,10 +179,10 @@ async def upload_video_with_metadata(
         tournament: Tournament name
     """
     # Validate file type
-    if file.content_type not in ALLOWED_VIDEO_TYPES:
+    if not is_allowed_video_upload(file):
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid file type. Allowed: {', '.join(ALLOWED_VIDEO_TYPES)}"
+            detail="Invalid file type. Allowed: MP4, MOV, AVI, WebM"
         )
 
     # Validate weapon
@@ -114,6 +204,7 @@ async def upload_video_with_metadata(
         "match_result": match_result,
         "score": score,
         "tournament": tournament,
+        "user_id": str(current_user.id),
     }
 
     # Save the video with metadata (size check included)
@@ -136,12 +227,12 @@ async def upload_video_with_metadata(
 
 
 @router.get("/list", response_model=VideoListResponse)
-async def list_videos():
+async def list_videos(current_user: User = Depends(get_current_user_required)):
     """
     List all uploaded videos with metadata.
     """
     try:
-        videos = video_service.list_videos()
+        videos = video_service.list_videos(user_id=str(current_user.id))
         return VideoListResponse(
             videos=videos,
             total=len(videos)
@@ -154,21 +245,45 @@ async def list_videos():
 
 
 @router.get("/{video_id}")
-async def get_video(video_id: str):
+async def get_video(
+    video_id: str,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
     """
     Get video details and metadata.
     """
-    metadata = video_service.get_video_metadata(video_id)
-    if not metadata:
-        raise HTTPException(
-            status_code=404,
-            detail="Video not found"
-        )
+    metadata = ensure_video_access(video_id, current_user)
     return metadata
 
 
+@router.get("/{video_id}/file")
+async def get_video_file(
+    video_id: str,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
+    """Serve uploaded video file for playback."""
+    metadata = ensure_video_access(video_id, current_user)
+    video_path = metadata.get("file_path") or video_service.get_video_path(video_id)
+    if not video_path:
+        raise HTTPException(
+            status_code=404,
+            detail="Video file not found"
+        )
+
+    media_type, _ = mimetypes.guess_type(video_path)
+
+    return FileResponse(
+        video_path,
+        media_type=media_type or "application/octet-stream",
+        headers={"Accept-Ranges": "bytes"},
+    )
+
+
 @router.post("/analyze", response_model=VideoAnalyzeResponse)
-async def analyze_video(request: VideoAnalyzeRequest):
+async def analyze_video(
+    request: VideoAnalyzeRequest,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
     """
     Analyze a previously uploaded video.
 
@@ -191,6 +306,8 @@ async def analyze_video(request: VideoAnalyzeRequest):
             status_code=400,
             detail="Depth must be between 1 and 5"
         )
+
+    ensure_video_access(request.video_id, current_user)
 
     # Get video path
     video_path = video_service.get_video_path(request.video_id)
@@ -223,14 +340,19 @@ async def analyze_video(request: VideoAnalyzeRequest):
 
 # Pose Analysis Endpoints
 @router.post("/analyze/pose", response_model=PoseAnalyzeResponse)
-async def analyze_pose(request: PoseAnalyzeRequest):
+async def analyze_pose(
+    request: PoseAnalyzeRequest,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
     """
     Analyze human pose in a video using MediaPipe.
 
     Args:
         video_id: ID of the video to analyze
-        sample_interval: Process every N frames (default 5)
+        sample_interval: Deprecated. Backend always processes every frame for quality.
     """
+    ensure_video_access(request.video_id, current_user)
+
     # Get video path
     video_path = video_service.get_video_path(request.video_id)
     if not video_path:
@@ -244,7 +366,6 @@ async def analyze_pose(request: PoseAnalyzeRequest):
         result = pose_analysis_service.analyze_pose(
             video_path=video_path,
             video_id=request.video_id,
-            sample_interval=request.sample_interval
         )
 
         return PoseAnalyzeResponse(
@@ -261,17 +382,52 @@ async def analyze_pose(request: PoseAnalyzeRequest):
         )
 
 
-@router.post("/{video_id}/analyze/pose/report")
-async def generate_pose_report(video_id: str):
+@router.get("/{video_id}/analysis-report", response_model=AnalysisReportResponse)
+async def get_analysis_report(
+    video_id: str,
+    current_user: User = Depends(get_current_user_required),
+    db: Session = Depends(get_db),
+):
+    metadata = ensure_video_access(video_id, current_user)
+    pose_data = pose_analysis_service.get_pose_data(video_id)
+    if not pose_data:
+        raise HTTPException(
+            status_code=404,
+            detail="Pose data not found. Please run pose analysis first.",
+        )
+
+    owner_id = metadata.get("user_id") or str(current_user.id)
+    report = analysis_report_service.get_current_report(
+        db,
+        user_id=owner_id,
+        video_id=video_id,
+        pose_hash=analysis_report_service.build_pose_hash(pose_data),
+        model_name=analysis_report_service.model_name,
+    )
+
+    if not report:
+        raise HTTPException(status_code=404, detail="Analysis report not found")
+
+    return AnalysisReportResponse(**analysis_report_service.serialize_report(report))
+
+
+@router.post("/{video_id}/analyze/pose/report", response_model=AnalysisReportGenerateResponse)
+async def generate_pose_report(
+    video_id: str,
+    force_regenerate: bool = Query(default=False),
+    current_user: User = Depends(get_current_user_required),
+    db: Session = Depends(get_db),
+):
     """
     Generate a technical analysis report from pose data using LLM.
 
     This endpoint:
     1. Fetches pose data for the video
-    2. Fetches computed fencing metrics
-    3. Sends the full pose data to LLM to generate an analysis report
-    4. Returns the analysis text
+    2. Sends sampled pose data to LLM to generate an analysis report
+    3. Returns the analysis text
     """
+    metadata = ensure_video_access(video_id, current_user)
+
     # Get pose data
     pose_data = pose_analysis_service.get_pose_data(video_id)
     if not pose_data:
@@ -280,114 +436,18 @@ async def generate_pose_report(video_id: str):
             detail="Pose data not found. Please run pose analysis first."
         )
 
-    # Get metrics
     try:
-        metrics = pose_analysis_service.compute_fencing_metrics(pose_data)
-    except Exception as e:
-        metrics = {}
-
-    # Build complete pose data for LLM
-    pose_sequence = pose_data.get("pose_sequence", [])
-    video_props = pose_data.get("video_properties", {})
-
-    # Limit frames to avoid token overflow (max 100 frames)
-    max_frames = 100
-    if len(pose_sequence) > max_frames:
-        # Sample frames evenly across the entire sequence
-        # Use numpy linspace for even distribution
-        import numpy as np
-        indices = np.linspace(0, len(pose_sequence) - 1, max_frames, dtype=int)
-        sampled_sequence = [pose_sequence[i] for i in indices]
-    else:
-        sampled_sequence = pose_sequence
-
-    # Build structured pose data for LLM
-    pose_frames = []
-    for frame in sampled_sequence:
-        landmarks = frame.get("landmarks", [])
-        # Extract key fencing-relevant points: shoulders, hips, elbows, wrists, knees, ankles
-        key_points = {}
-        key_indices = {
-            "nose": 0,
-            "left_shoulder": 11, "right_shoulder": 12,
-            "left_elbow": 13, "right_elbow": 14,
-            "left_wrist": 15, "right_wrist": 16,
-            "left_hip": 23, "right_hip": 24,
-            "left_knee": 25, "right_knee": 26,
-            "left_ankle": 27, "right_ankle": 28,
-        }
-        for name, idx in key_indices.items():
-            if idx < len(landmarks):
-                lm = landmarks[idx]
-                key_points[name] = {
-                    "x": round(lm["x"], 3),
-                    "y": round(lm["y"], 3),
-                    "z": round(lm["z"], 3),
-                    "visibility": round(lm["visibility"], 2)
-                }
-
-        pose_frames.append({
-            "frame_index": frame.get("frame_index"),
-            "timestamp": round(frame.get("timestamp", 0), 2),
-            "key_points": key_points
-        })
-
-    # Convert to JSON string for prompt
-    pose_json = json.dumps(pose_frames, ensure_ascii=False, indent=2)
-    metrics_json = json.dumps(metrics, ensure_ascii=False, indent=2)
-
-    # Build analysis prompt with full pose data
-    prompt = f"""你是一位专业的击剑教练AI助手。请分析以下击剑视频的姿态数据，并提供详细的技术改进建议。
-
-## 视频信息
-- Video ID: {video_id}
-- 总帧数: {video_props.get('frame_count', 'N/A')}
-- FPS: {video_props.get('fps', 'N/A')}
-- 时长: {video_props.get('duration', 0):.2f}秒
-- 分析帧数: {len(sampled_sequence)}/{len(pose_sequence)} (已采样)
-
-## 击剑指标
-{metrics_json}
-
-## 姿态关键点数据 (每帧33点中的关键点)
-以下是采样帧的姿态数据，包含以下关键点坐标 (x, y, z为归一化坐标 0-1, visibility为可见度):
-- nose: 鼻子
-- left_shoulder/right_shoulder: 左/右肩
-- left_elbow/right_elbow: 左/右肘
-- left_wrist/right_wrist: 左/右手腕
-- left_hip/right_hip: 左/右髋
-- left_knee/right_knee: 左/右膝
-- left_ankle/right_ankle: 左/右踝
-
-{pose_json}
-
-请根据以上完整的姿态数据提供:
-1. **整体姿态分析** - 运动员的基本姿势和重心
-2. **动作识别** - 识别出具体动作（如弓步lunge、冲刺advance、撤退retreat、进攻attack、防守parry等）
-3. **技术优点** - 动作中做得好的地方
-4. **技术问题** - 需要改进的地方
-5. **训练建议** - 具体的技术训练重点
-
-请用中文回复，分析要详细具体，基于实际数据。"""
-
-    try:
-        # Call LLM to generate report
-        response = await llm_service.chat(
-            messages=[{"role": "user", "content": prompt}],
-            context="Pose analysis report generation"
+        owner_id = metadata.get("user_id") or str(current_user.id)
+        report, cached = await analysis_report_service.generate_pose_report(
+            db,
+            user_id=owner_id,
+            video_id=video_id,
+            pose_data=pose_data,
+            force_regenerate=force_regenerate,
         )
-        # Extract key metrics for response
-        avg_visibility = metrics.get("avg_visibility", 0)
-        frame_count = len(pose_sequence)
-
-        return {
-            "video_id": video_id,
-            "report": response,
-            "metrics": {
-                "frame_count": frame_count,
-                "avg_visibility": avg_visibility,
-            }
-        }
+        return AnalysisReportGenerateResponse(
+            **analysis_report_service.serialize_report(report, cached=cached)
+        )
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -396,12 +456,17 @@ async def generate_pose_report(video_id: str):
 
 
 @router.get("/{video_id}/pose-overlay", response_model=PoseOverlayResponse)
-async def get_pose_overlay(video_id: str):
+async def get_pose_overlay(
+    video_id: str,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
     """
     Get or generate pose overlay video for a video.
 
     This endpoint generates a video with pose skeleton overlay.
     """
+    ensure_video_access(video_id, current_user)
+
     # Get video path
     video_path = video_service.get_video_path(video_id)
     if not video_path:
@@ -438,13 +503,56 @@ async def get_pose_overlay(video_id: str):
         )
 
 
+@router.get("/{video_id}/pose-overlay/file")
+async def get_pose_overlay_file(
+    video_id: str,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
+    """
+    Serve pose overlay video for playback, generating it on demand if needed.
+    """
+    ensure_video_access(video_id, current_user)
+
+    video_path = video_service.get_video_path(video_id)
+    if not video_path:
+        raise HTTPException(
+            status_code=404,
+            detail="Video not found. Please upload the video first."
+        )
+
+    overlay_path = pose_analysis_service.get_overlay_path(video_id)
+    if not overlay_path:
+        try:
+            overlay_path = pose_analysis_service.generate_pose_overlay(
+                video_path=video_path,
+                video_id=video_id,
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to generate pose overlay: {str(e)}"
+            )
+
+    media_type, _ = mimetypes.guess_type(overlay_path)
+    return FileResponse(
+        overlay_path,
+        media_type=media_type or "video/mp4",
+        headers={"Accept-Ranges": "bytes"},
+    )
+
+
 @router.get("/{video_id}/pose-data")
-async def get_pose_data(video_id: str):
+async def get_pose_data(
+    video_id: str,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
     """
     Get pose analysis data for a video.
 
     Returns the detected pose landmarks for each processed frame.
     """
+    ensure_video_access(video_id, current_user)
+
     pose_data = pose_analysis_service.get_pose_data(video_id)
     if not pose_data:
         raise HTTPException(
@@ -453,27 +561,3 @@ async def get_pose_data(video_id: str):
         )
 
     return pose_data
-
-
-@router.get("/{video_id}/pose-metrics", response_model=FencingMetrics)
-async def get_pose_metrics(video_id: str):
-    """
-    Get fencing-specific metrics computed from pose data.
-
-    This includes movement metrics, visibility scores, etc.
-    """
-    pose_data = pose_analysis_service.get_pose_data(video_id)
-    if not pose_data:
-        raise HTTPException(
-            status_code=404,
-            detail="Pose data not found. Please run pose analysis first."
-        )
-
-    try:
-        metrics = pose_analysis_service.compute_fencing_metrics(pose_data)
-        return FencingMetrics(**metrics)
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to compute metrics: {str(e)}"
-        )

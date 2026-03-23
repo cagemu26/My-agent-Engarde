@@ -77,13 +77,16 @@ class VideoService:
                 return json.load(f)
         return None
 
-    def list_videos(self) -> list[dict]:
-        """List all uploaded videos with metadata"""
+    def list_videos(self, user_id: Optional[str] = None) -> list[dict]:
+        """List uploaded videos with optional owner filter."""
         videos = []
         for metadata_file in self.metadata_dir.glob("*.json"):
             try:
                 with open(metadata_file, encoding="utf-8") as f:
-                    videos.append(json.load(f))
+                    metadata = json.load(f)
+                    if user_id is not None and str(metadata.get("user_id", "")) != str(user_id):
+                        continue
+                    videos.append(metadata)
             except Exception:
                 continue
 

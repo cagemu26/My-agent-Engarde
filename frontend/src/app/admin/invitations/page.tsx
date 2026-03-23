@@ -1,11 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { buildApiUrl } from "@/lib/api";
 
 interface Invitation {
   id: string;
@@ -32,15 +31,10 @@ export default function InvitationsPage() {
     }
   }, [user, isLoading, router]);
 
-  useEffect(() => {
-    if (user && user.is_admin && token) {
-      fetchInvitations();
-    }
-  }, [user, token]);
-
-  const fetchInvitations = async () => {
+  const fetchInvitations = useCallback(async () => {
+    if (!token) return;
     try {
-      const response = await fetch(`${API_URL}/api/admin/invitations`, {
+      const response = await fetch(buildApiUrl("/api/admin/invitations"), {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -55,12 +49,18 @@ export default function InvitationsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [token]);
+
+  useEffect(() => {
+    if (user && user.is_admin && token) {
+      fetchInvitations();
+    }
+  }, [user, token, fetchInvitations]);
 
   const createInvitations = async (count: number) => {
     setIsCreating(true);
     try {
-      const response = await fetch(`${API_URL}/api/admin/invitations`, {
+      const response = await fetch(buildApiUrl("/api/admin/invitations"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -75,7 +75,7 @@ export default function InvitationsPage() {
       const data = await response.json();
       setSuccess(`Created ${count} invitation code(s): ${data.invitations.map((i: { code: string }) => i.code).join(", ")}`);
       setTimeout(() => setSuccess(""), 10000);
-      fetchInvitations();
+      await fetchInvitations();
     } catch (err) {
       setError(err instanceof Error ? err.message : "An error occurred");
       setTimeout(() => setError(""), 3000);
@@ -85,8 +85,10 @@ export default function InvitationsPage() {
   };
 
   const deleteInvitation = async (id: string) => {
+    if (!window.confirm("Delete this invitation code? This action cannot be undone.")) return;
+
     try {
-      const response = await fetch(`${API_URL}/api/admin/invitations/${id}`, {
+      const response = await fetch(buildApiUrl(`/api/admin/invitations/${id}`), {
         method: "DELETE",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -98,7 +100,7 @@ export default function InvitationsPage() {
       }
       setSuccess("Invitation deleted successfully");
       setTimeout(() => setSuccess(""), 3000);
-      fetchInvitations();
+      await fetchInvitations();
     } catch (err) {
       setError(err instanceof Error ? err.message : "An error occurred");
       setTimeout(() => setError(""), 3000);

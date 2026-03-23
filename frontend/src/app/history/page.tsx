@@ -1,7 +1,16 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
+import { authFetch } from "@/lib/api";
+import { TopNav } from "@/components/top-nav";
+
+const HISTORY_NAV_LINKS = [
+  { href: "/analyze", label: "Analyze" },
+  { href: "/training", label: "Training" },
+  { href: "/feedback", label: "Feedback" },
+  { href: "/admin", label: "Admin", adminOnly: true },
+] as const;
 
 interface VideoMetadata {
   video_id: string;
@@ -19,16 +28,11 @@ export default function History() {
   const [videos, setVideos] = useState<VideoMetadata[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedWeapon, setSelectedWeapon] = useState<string>("all");
 
-  useEffect(() => {
-    fetchVideos();
-  }, []);
-
-  const fetchVideos = async () => {
+  const fetchVideos = useCallback(async () => {
     try {
       setLoading(true);
-      const response = await fetch("http://localhost:8000/video/list");
+      const response = await authFetch("/video/list");
       if (!response.ok) {
         throw new Error("Failed to fetch videos");
       }
@@ -40,7 +44,11 @@ export default function History() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    fetchVideos();
+  }, [fetchVideos]);
 
   const formatDate = (dateString: string) => {
     const date = new Date(dateString);
@@ -75,10 +83,6 @@ export default function History() {
     return colors[weapon?.toLowerCase()] || "#6B7280";
   };
 
-  const filteredVideos = selectedWeapon === "all"
-    ? videos
-    : videos.filter(v => v.weapon.toLowerCase() === selectedWeapon.toLowerCase());
-
   return (
     <div className="min-h-screen bg-background overflow-hidden">
       {/* Background Effects */}
@@ -87,35 +91,7 @@ export default function History() {
         <div className="absolute bottom-0 right-1/4 w-[400px] h-[400px] bg-amber-500/5 rounded-full blur-[80px]"></div>
       </div>
 
-      {/* Navigation */}
-      <nav className="fixed top-0 left-0 right-0 z-50 glass border-b border-border/50">
-        <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
-          <Link href="/" className="flex items-center gap-3 group">
-            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-red-600 to-red-700 flex items-center justify-center shadow-lg shadow-red-500/30 group-hover:scale-105 transition-transform duration-300">
-              <span className="text-white font-bold text-lg">E</span>
-            </div>
-            <div>
-              <span className="font-bold text-xl tracking-tight">Engarde</span>
-              <span className="font-bold text-xl text-red-600">AI</span>
-            </div>
-          </Link>
-
-          <div className="hidden md:flex items-center gap-8">
-            <Link href="/analyze" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors hover-lift">
-              Analyze
-            </Link>
-            <Link href="/training" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors hover-lift">
-              Training
-            </Link>
-            <Link href="/history" className="text-sm font-medium text-red-600 hover-lift">
-              History
-            </Link>
-            <Link href="/demo" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors hover-lift">
-              Demo
-            </Link>
-          </div>
-        </div>
-      </nav>
+      <TopNav activeHref="/history" links={[...HISTORY_NAV_LINKS]} />
 
       <main className="pt-32 pb-16">
         <div className="max-w-6xl mx-auto px-6">
@@ -129,6 +105,10 @@ export default function History() {
               <p className="text-sm text-muted-foreground">Total Videos</p>
               <p className="text-4xl font-bold gradient-text">{videos.length}</p>
             </div>
+          </div>
+
+          <div className="mb-8 rounded-2xl border border-amber-200 bg-amber-50/70 p-4 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
+            History is now integrated into <Link href="/analyze" className="font-semibold underline underline-offset-2">Analyze</Link> as a collapsible sidebar for faster browsing.
           </div>
 
           {/* Loading State */}
@@ -181,71 +161,30 @@ export default function History() {
           {/* Filters */}
           {!loading && !error && videos.length > 0 && (
             <>
-              <div className="flex gap-3 mb-8">
-                <button
-                  onClick={() => setSelectedWeapon("all")}
-                  className={`px-5 py-2.5 rounded-xl font-medium text-sm transition-all duration-300 ${
-                    selectedWeapon === "all"
-                      ? "bg-gradient-to-r from-red-600 to-red-700 text-white shadow-lg shadow-red-500/30"
-                      : "bg-card border border-border hover:border-red-300"
-                  }`}
-                >
-                  All
-                </button>
-                <button
-                  onClick={() => setSelectedWeapon("foil")}
-                  className={`px-5 py-2.5 rounded-xl font-medium text-sm transition-all duration-300 ${
-                    selectedWeapon === "foil"
-                      ? "bg-gradient-to-r from-orange-500 to-orange-600 text-white shadow-lg shadow-orange-500/30"
-                      : "bg-card border border-border hover:border-orange-300"
-                  }`}
-                >
-                  Foil
-                </button>
-                <button
-                  onClick={() => setSelectedWeapon("epee")}
-                  className={`px-5 py-2.5 rounded-xl font-medium text-sm transition-all duration-300 ${
-                    selectedWeapon === "epee"
-                      ? "bg-gradient-to-r from-red-600 to-red-700 text-white shadow-lg shadow-red-500/30"
-                      : "bg-card border border-border hover:border-red-300"
-                  }`}
-                >
-                  Épée
-                </button>
-                <button
-                  onClick={() => setSelectedWeapon("sabre")}
-                  className={`px-5 py-2.5 rounded-xl font-medium text-sm transition-all duration-300 ${
-                    selectedWeapon === "sabre"
-                      ? "bg-gradient-to-r from-cyan-500 to-cyan-600 text-white shadow-lg shadow-cyan-500/30"
-                      : "bg-card border border-border hover:border-cyan-300"
-                  }`}
-                >
-                  Sabre
-                </button>
-              </div>
-
               {/* History List */}
               <div className="space-y-4">
-                {filteredVideos.map((video) => (
-                  <Link
+                {videos.map((video) => (
+                  <div
                     key={video.video_id}
-                    href={`/history/${video.video_id}`}
-                    className="block group"
+                    className="glass-card rounded-2xl p-5 transition-all duration-300 hover-lift"
                   >
-                    <div className="glass-card p-5 rounded-2xl hover-lift transition-all duration-300 cursor-pointer">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-5">
+                    <div className="flex items-center justify-between gap-4">
+                      <Link
+                        href={`/history/${video.video_id}`}
+                        className="group flex min-w-0 flex-1 items-center justify-between gap-4"
+                      >
+                        <div className="flex min-w-0 items-center gap-5">
                           <div
-                            className="w-16 h-16 rounded-2xl flex items-center justify-center shadow-lg"
+                            className="flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl shadow-lg"
                             style={{ backgroundColor: `${getWeaponColor(video.weapon)}20` }}
                           >
                             <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke={getWeaponColor(video.weapon)} strokeWidth={2}>
                               <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
                             </svg>
                           </div>
-                          <div>
-                            <h3 className="font-semibold text-lg group-hover:text-red-600 transition-colors">{video.title || "Untitled Video"}</h3>
-                            <div className="flex items-center gap-3 text-sm text-muted-foreground mt-1">
+                          <div className="min-w-0">
+                            <h3 className="truncate text-lg font-semibold transition-colors group-hover:text-red-600">{video.title || "Untitled Video"}</h3>
+                            <div className="mt-1 flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
                               <span
                                 className="px-2.5 py-0.5 rounded-full text-xs font-medium"
                                 style={{
@@ -266,7 +205,7 @@ export default function History() {
                             </div>
                           </div>
                         </div>
-                        <div className="flex items-center gap-4">
+                        <div className="flex shrink-0 items-center gap-4">
                           {video.match_result && (
                             <span className={`px-3 py-1.5 rounded-full text-xs font-semibold ${
                               video.match_result === "win"
@@ -287,9 +226,23 @@ export default function History() {
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                           </svg>
                         </div>
+                      </Link>
+                      <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
+                        <Link
+                          href={`/history/${video.video_id}?view=replay`}
+                          className="rounded-xl border border-border px-3 py-2 text-center text-sm font-medium text-foreground transition-colors hover:border-primary/40 hover:bg-secondary"
+                        >
+                          Replay
+                        </Link>
+                        <Link
+                          href={`/history/${video.video_id}?view=skeleton`}
+                          className="rounded-xl bg-gradient-to-r from-red-600 to-red-700 px-3 py-2 text-center text-sm font-medium text-white transition-all hover:shadow-lg hover:shadow-red-500/30"
+                        >
+                          Skeleton Replay
+                        </Link>
                       </div>
                     </div>
-                  </Link>
+                  </div>
                 ))}
               </div>
             </>

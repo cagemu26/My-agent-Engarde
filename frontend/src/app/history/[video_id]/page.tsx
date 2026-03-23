@@ -1,8 +1,18 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
+import { authFetch, buildAuthedApiUrl } from "@/lib/api";
+import { ReportMarkdown } from "@/components/report-markdown";
+import { TopNav } from "@/components/top-nav";
+
+const HISTORY_DETAIL_NAV_LINKS = [
+  { href: "/analyze", label: "Analyze" },
+  { href: "/training", label: "Training" },
+  { href: "/feedback", label: "Feedback" },
+  { href: "/admin", label: "Admin", adminOnly: true },
+] as const;
 
 interface VideoMetadata {
   video_id: string;
@@ -30,44 +40,47 @@ interface PoseData {
   };
 }
 
-interface FencingMetrics {
-  average_lunge_distance: number;
-  average_recovery_time: number;
-  visibility_score: number;
-  dominant_stance: string;
-  total_movements: number;
+interface AnalysisReport {
+  report_id: string;
+  video_id: string;
+  report: string;
+  summary: string;
+  status: string;
+  model_name: string;
+  prompt_version: string;
+  created_at: string;
+  updated_at: string;
+  cached?: boolean;
 }
 
-interface AnalysisReport {
-  report: string;
-}
+type ReplayMode = "original" | "skeleton";
 
 export default function VideoDetail() {
   const params = useParams();
+  const searchParams = useSearchParams();
   const videoId = params.video_id as string;
 
   const [video, setVideo] = useState<VideoMetadata | null>(null);
   const [poseData, setPoseData] = useState<PoseData | null>(null);
-  const [metrics, setMetrics] = useState<FencingMetrics | null>(null);
-  const [report, setReport] = useState<string | null>(null);
+  const [report, setReport] = useState<AnalysisReport | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
+  const [replayMode, setReplayMode] = useState<ReplayMode>("original");
+  const [skeletonReady, setSkeletonReady] = useState(false);
+  const [skeletonLoading, setSkeletonLoading] = useState(false);
+  const [skeletonError, setSkeletonError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (videoId) {
-      fetchVideoData();
-    }
-  }, [videoId]);
-
-  const fetchVideoData = async () => {
+  const fetchVideoData = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
+      setReportError(null);
 
       // Fetch video metadata
-      const videoResponse = await fetch(`http://localhost:8000/video/${videoId}`);
+      const videoResponse = await authFetch(`/video/${videoId}`);
       if (!videoResponse.ok) {
         throw new Error("Failed to fetch video");
       }
@@ -76,7 +89,7 @@ export default function VideoDetail() {
 
       // Fetch pose data (if available)
       try {
-        const poseResponse = await fetch(`http://localhost:8000/video/${videoId}/pose-data`);
+        const poseResponse = await authFetch(`/video/${videoId}/pose-data`);
         if (poseResponse.ok) {
           const poseData = await poseResponse.json();
           setPoseData(poseData);
@@ -85,15 +98,18 @@ export default function VideoDetail() {
         // Pose data not available
       }
 
-      // Fetch metrics (if available)
       try {
-        const metricsResponse = await fetch(`http://localhost:8000/video/${videoId}/pose-metrics`);
-        if (metricsResponse.ok) {
-          const metricsData = await metricsResponse.json();
-          setMetrics(metricsData);
+        const reportResponse = await authFetch(`/video/${videoId}/analysis-report`);
+        if (reportResponse.ok) {
+          const reportData = (await reportResponse.json()) as AnalysisReport;
+          setReport(reportData);
+        } else if (reportResponse.status === 404) {
+          setReport(null);
+        } else {
+          setReportError("Failed to fetch report");
         }
       } catch {
-        // Metrics not available
+        setReport(null);
       }
 
     } catch (err) {
@@ -101,21 +117,65 @@ export default function VideoDetail() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [videoId]);
+
+  useEffect(() => {
+    if (videoId) {
+      fetchVideoData();
+    }
+  }, [videoId, fetchVideoData]);
+
+  useEffect(() => {
+    const initialView = searchParams.get("view");
+    if (initialView === "skeleton") {
+      setReplayMode("skeleton");
+    } else if (initialView === "replay") {
+      setReplayMode("original");
+    }
+  }, [searchParams]);
+
+  const ensureSkeletonReplay = useCallback(async () => {
+    if (skeletonReady || skeletonLoading) {
+      return;
+    }
+
+    try {
+      setSkeletonLoading(true);
+      setSkeletonError(null);
+      const response = await authFetch(`/video/${videoId}/pose-overlay`);
+      if (!response.ok) {
+        throw new Error("Failed to prepare skeleton replay");
+      }
+      await response.json();
+      setSkeletonReady(true);
+    } catch (err) {
+      setSkeletonError(err instanceof Error ? err.message : "Failed to prepare skeleton replay");
+    } finally {
+      setSkeletonLoading(false);
+    }
+  }, [skeletonLoading, skeletonReady, videoId]);
+
+  useEffect(() => {
+    if (replayMode === "skeleton") {
+      void ensureSkeletonReplay();
+    }
+  }, [ensureSkeletonReplay, replayMode]);
 
   const generateReport = async () => {
     try {
       setReportLoading(true);
-      const response = await fetch(`http://localhost:8000/video/${videoId}/analyze/pose/report`, {
+      setReportError(null);
+      const regenerateQuery = report ? "?force_regenerate=true" : "";
+      const response = await authFetch(`/video/${videoId}/analyze/pose/report${regenerateQuery}`, {
         method: "POST"
       });
       if (!response.ok) {
         throw new Error("Failed to generate report");
       }
       const data: AnalysisReport = await response.json();
-      setReport(data.report);
+      setReport(data);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to generate report");
+      setReportError(err instanceof Error ? err.message : "Failed to generate report");
     } finally {
       setReportLoading(false);
     }
@@ -149,6 +209,9 @@ export default function VideoDetail() {
     });
   };
 
+  const originalReplayUrl = buildAuthedApiUrl(`/video/${videoId}/file`);
+  const skeletonReplayUrl = buildAuthedApiUrl(`/video/${videoId}/pose-overlay/file`);
+
   if (loading) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
@@ -163,16 +226,7 @@ export default function VideoDetail() {
   if (error || !video) {
     return (
       <div className="min-h-screen bg-background">
-        <nav className="fixed top-0 left-0 right-0 z-50 border-b border-border/40 bg-background/80 backdrop-blur-md">
-          <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
-            <Link href="/" className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
-                <span className="text-primary-foreground font-bold text-sm">E</span>
-              </div>
-              <span className="font-semibold text-lg">Engarde AI</span>
-            </Link>
-          </div>
-        </nav>
+        <TopNav activeHref="/history" links={[...HISTORY_DETAIL_NAV_LINKS]} />
         <main className="pt-32 pb-16">
           <div className="max-w-4xl mx-auto px-6">
             <div className="mb-6 p-4 rounded-xl bg-red-500/10 border border-red-500/20">
@@ -189,28 +243,7 @@ export default function VideoDetail() {
 
   return (
     <div className="min-h-screen bg-background">
-      {/* Navigation */}
-      <nav className="fixed top-0 left-0 right-0 z-50 border-b border-border/40 bg-background/80 backdrop-blur-md">
-        <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
-          <Link href="/" className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
-              <span className="text-primary-foreground font-bold text-sm">E</span>
-            </div>
-            <span className="font-semibold text-lg">Engarde AI</span>
-          </Link>
-          <div className="flex items-center gap-6">
-            <Link href="/analyze" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
-              Analyze
-            </Link>
-            <Link href="/training" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
-              Training
-            </Link>
-            <Link href="/history" className="text-sm text-primary font-medium">
-              History
-            </Link>
-          </div>
-        </div>
-      </nav>
+      <TopNav activeHref="/history" links={[...HISTORY_DETAIL_NAV_LINKS]} />
 
       <main className="pt-32 pb-16">
         <div className="max-w-4xl mx-auto px-6">
@@ -281,6 +314,93 @@ export default function VideoDetail() {
             </div>
           </div>
 
+          <div id="replay" className="mb-6">
+            <div className="mb-4 flex items-center justify-between gap-4">
+              <div>
+                <h2 className="text-xl font-semibold">Replay</h2>
+                <p className="text-sm text-muted-foreground">Review the original clip or switch to the skeleton overlay replay.</p>
+              </div>
+              <div className="inline-flex rounded-xl border border-border bg-card p-1">
+                <button
+                  type="button"
+                  onClick={() => setReplayMode("original")}
+                  className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
+                    replayMode === "original" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  Original
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setReplayMode("skeleton")}
+                  className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
+                    replayMode === "skeleton" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  Skeleton
+                </button>
+              </div>
+            </div>
+
+            <div className="overflow-hidden rounded-2xl border border-border bg-card">
+              <div className="aspect-video bg-black">
+                {replayMode === "skeleton" && skeletonLoading ? (
+                  <div className="flex h-full items-center justify-center">
+                    <div className="flex flex-col items-center gap-3">
+                      <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent"></div>
+                      <p className="text-sm text-muted-foreground">Preparing skeleton replay...</p>
+                    </div>
+                  </div>
+                ) : replayMode === "skeleton" && skeletonError ? (
+                  <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
+                    <p className="text-sm text-red-500">{skeletonError}</p>
+                    <button
+                      type="button"
+                      onClick={() => void ensureSkeletonReplay()}
+                      className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+                    >
+                      Retry Skeleton Replay
+                    </button>
+                  </div>
+                ) : (
+                  <video
+                    key={replayMode}
+                    controls
+                    playsInline
+                    preload="metadata"
+                    className="h-full w-full"
+                    src={replayMode === "skeleton" ? skeletonReplayUrl : originalReplayUrl}
+                  />
+                )}
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-4 py-3 text-sm">
+                <p className="text-muted-foreground">
+                  {replayMode === "skeleton"
+                    ? "Skeleton replay overlays detected pose landmarks on top of the original clip."
+                    : "Original replay lets you inspect the source footage before or after comparing the overlay."}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <a
+                    href={originalReplayUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="rounded-lg border border-border px-3 py-2 font-medium transition-colors hover:border-primary/40 hover:bg-secondary"
+                  >
+                    Open Original
+                  </a>
+                  <a
+                    href={buildAuthedApiUrl(`/video/${videoId}/pose-overlay/file`)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="rounded-lg bg-secondary px-3 py-2 font-medium transition-colors hover:bg-secondary/80"
+                  >
+                    Open Skeleton
+                  </a>
+                </div>
+              </div>
+            </div>
+          </div>
+
           {/* Pose Analysis Summary */}
           {poseData && (
             <div className="mb-6">
@@ -318,71 +438,44 @@ export default function VideoDetail() {
             </div>
           )}
 
-          {/* Fencing Metrics */}
-          {metrics && (
-            <div className="mb-6">
-              <h2 className="text-xl font-semibold mb-4">Fencing Metrics</h2>
-              <div className="p-4 rounded-xl bg-card border border-border">
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-                  <div>
-                    <p className="text-sm text-muted-foreground">Avg Lunge Distance</p>
-                    <p className="text-xl font-bold">{metrics.average_lunge_distance?.toFixed(2) || 0}m</p>
-                  </div>
-                  <div>
-                    <p className="text-sm text-muted-foreground">Avg Recovery Time</p>
-                    <p className="text-xl font-bold">{metrics.average_recovery_time?.toFixed(2) || 0}s</p>
-                  </div>
-                  <div>
-                    <p className="text-sm text-muted-foreground">Visibility Score</p>
-                    <p className="text-xl font-bold">{metrics.visibility_score?.toFixed(1) || 0}%</p>
-                  </div>
-                  <div>
-                    <p className="text-sm text-muted-foreground">Dominant Stance</p>
-                    <p className="text-xl font-bold capitalize">{metrics.dominant_stance || "Unknown"}</p>
-                  </div>
-                  <div>
-                    <p className="text-sm text-muted-foreground">Total Movements</p>
-                    <p className="text-xl font-bold">{metrics.total_movements || 0}</p>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Skeleton Overlay Link */}
-          <div className="mb-6">
-            <h2 className="text-xl font-semibold mb-4">Visual Analysis</h2>
-            <Link
-              href={`/demo?video=${videoId}`}
-              className="flex items-center justify-between p-4 rounded-xl bg-card border border-border hover:border-primary/30 transition-colors"
-            >
-              <div className="flex items-center gap-4">
-                <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center">
-                  <svg className="w-6 h-6 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                </div>
-                <div>
-                  <p className="font-medium">View Skeleton Overlay</p>
-                  <p className="text-sm text-muted-foreground">Watch video with pose landmarks overlay</p>
-                </div>
-              </div>
-              <svg className="w-5 h-5 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-              </svg>
-            </Link>
-          </div>
-
           {/* AI Analysis Report */}
           <div className="mb-6">
             <h2 className="text-xl font-semibold mb-4">AI Analysis Report</h2>
 
+            {reportError && (
+              <div className="mb-4 p-4 rounded-xl bg-red-500/10 border border-red-500/20">
+                <p className="text-red-500 text-sm">{reportError}</p>
+              </div>
+            )}
+
             {report ? (
               <div className="p-4 rounded-xl bg-card border border-border">
-                <div className="prose prose-invert max-w-none">
-                  <p className="whitespace-pre-wrap text-foreground leading-relaxed">{report}</p>
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                    <span className="rounded-full bg-secondary px-2.5 py-1">
+                      {report.cached ? "Cached report" : "Saved report"}
+                    </span>
+                    <span>
+                      Updated {new Date(report.updated_at).toLocaleString("en-US", {
+                        year: "numeric",
+                        month: "short",
+                        day: "numeric",
+                        hour: "numeric",
+                        minute: "2-digit",
+                      })}
+                    </span>
+                    {reportLoading && <span>Refreshing report...</span>}
+                  </div>
+                  {poseData && !reportLoading && (
+                    <button
+                      onClick={generateReport}
+                      className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
+                    >
+                      Regenerate Report
+                    </button>
+                  )}
                 </div>
+                <ReportMarkdown content={report.report} summary={report.summary} />
               </div>
             ) : poseData ? (
               <div className="p-4 rounded-xl bg-card border border-border">
@@ -396,7 +489,7 @@ export default function VideoDetail() {
                 ) : (
                   <div className="text-center py-4">
                     <p className="text-muted-foreground mb-4">
-                      Generate an AI-powered analysis report based on pose data and metrics.
+                      Generate an AI-powered analysis report based on pose data.
                     </p>
                     <button
                       onClick={generateReport}
@@ -410,14 +503,14 @@ export default function VideoDetail() {
             ) : (
               <div className="p-4 rounded-xl bg-muted/50 border border-border">
                 <p className="text-muted-foreground text-sm">
-                  No pose data available. Run pose analysis first to generate metrics and AI reports.
+                  No pose data available. Run pose analysis first to generate an AI report.
                 </p>
               </div>
             )}
           </div>
 
           {/* No Data State */}
-          {!poseData && !metrics && (
+          {!poseData && (
             <div className="p-6 rounded-xl bg-muted/50 border border-border text-center">
               <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">
                 <svg className="w-6 h-6 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor">

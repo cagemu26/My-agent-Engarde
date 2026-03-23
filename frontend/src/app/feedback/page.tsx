@@ -2,12 +2,17 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { useAuth } from "@/lib/auth";
+import { authFetch } from "@/lib/api";
+import { TopNav } from "@/components/top-nav";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const FEEDBACK_NAV_LINKS = [
+  { href: "/analyze", label: "Analyze" },
+  { href: "/training", label: "Training" },
+  { href: "/feedback", label: "Feedback" },
+  { href: "/admin", label: "Admin", adminOnly: true },
+] as const;
 
 export default function FeedbackPage() {
-  const { user, isLoading: authLoading } = useAuth();
   const [category, setCategory] = useState("general");
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
@@ -21,7 +26,7 @@ export default function FeedbackPage() {
     setIsLoading(true);
 
     try {
-      const response = await fetch(`${API_URL}/api/feedback`, {
+      const response = await authFetch("/api/feedback", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -39,7 +44,7 @@ export default function FeedbackPage() {
         const data = await response.json();
         setError(data.detail || "Failed to submit feedback");
       }
-    } catch (err) {
+    } catch {
       setError("An error occurred");
     } finally {
       setIsLoading(false);
@@ -56,25 +61,7 @@ export default function FeedbackPage() {
           <div className="absolute inset-0 section-grid opacity-30"></div>
         </div>
 
-        {/* Navigation */}
-        <nav className="fixed top-0 left-0 right-0 z-50 glass border-b border-border/50">
-          <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
-            <Link href="/" className="flex items-center gap-3 group">
-              <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-red-600 to-red-700 flex items-center justify-center shadow-lg shadow-red-500/30 group-hover:scale-105 transition-transform duration-300">
-                <span className="text-white font-bold text-lg">E</span>
-              </div>
-              <div>
-                <span className="font-bold text-xl tracking-tight">Engarde</span>
-                <span className="font-bold text-xl text-red-600">AI</span>
-              </div>
-            </Link>
-            <div className="flex items-center gap-4">
-              <Link href="/" className="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground">
-                Home
-              </Link>
-            </div>
-          </div>
-        </nav>
+        <TopNav activeHref="/feedback" links={[...FEEDBACK_NAV_LINKS]} />
 
         <main className="pt-32 pb-20 relative">
           <div className="max-w-md mx-auto px-6">
@@ -110,34 +97,7 @@ export default function FeedbackPage() {
         <div className="absolute inset-0 section-grid opacity-30"></div>
       </div>
 
-      {/* Navigation */}
-      <nav className="fixed top-0 left-0 right-0 z-50 glass border-b border-border/50">
-        <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
-          <Link href="/" className="flex items-center gap-3 group">
-            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-red-600 to-red-700 flex items-center justify-center shadow-lg shadow-red-500/30 group-hover:scale-105 transition-transform duration-300">
-              <span className="text-white font-bold text-lg">E</span>
-            </div>
-            <div>
-              <span className="font-bold text-xl tracking-tight">Engarde</span>
-              <span className="font-bold text-xl text-red-600">AI</span>
-            </div>
-          </Link>
-          <div className="flex items-center gap-4">
-            <Link href="/" className="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground">
-              Home
-            </Link>
-            {user ? (
-              <Link href="/" className="px-4 py-2 rounded-xl border border-red-200 text-red-600 font-medium hover:bg-red-50 transition-all">
-                {user.username}
-              </Link>
-            ) : (
-              <Link href="/login" className="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground">
-                Login
-              </Link>
-            )}
-          </div>
-        </div>
-      </nav>
+      <TopNav activeHref="/feedback" links={[...FEEDBACK_NAV_LINKS]} />
 
       {/* Main Content */}
       <main className="pt-32 pb-20 relative">
