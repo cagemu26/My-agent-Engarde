@@ -14,7 +14,7 @@ const TRAINING_NAV_LINKS = [
 
 const TRAINING_HANDOFF_STORAGE_KEY = "engarde.training.handoff";
 const ANALYZE_WINDOW_DAYS = 14;
-const WEEKDAY_LABELS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"] as const;
+const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 
 const RPE_LEVEL_GUIDE = [
   { range: "1-2", label: "Very Easy", description: "Recovery pace, almost no strain", color: "#22c55e" },
@@ -86,10 +86,10 @@ const formatDisplayDate = (dateKey: string) => {
   const [year, month, day] = dateKey.split("-").map((item) => Number(item));
   const value = new Date(year, month - 1, day);
   const weekday = WEEKDAY_LABELS[value.getDay()] || "";
-  return `${year}年${month}月${day}日 ${weekday}`;
+  return `${value.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })} ${weekday}`;
 };
 
-const getMonthLabel = (value: Date) => `${value.getFullYear()}年${value.getMonth() + 1}月`;
+const getMonthLabel = (value: Date) => value.toLocaleDateString("en-US", { year: "numeric", month: "long" });
 
 const sortLogsDesc = (a: TrainingLogItem, b: TrainingLogItem) => {
   if (a.training_date !== b.training_date) {
@@ -501,7 +501,7 @@ export default function TrainingPage() {
         opening_message:
           `Training context is attached (${logsForAnalysis.length} entries, ` +
           `last ${ANALYZE_WINDOW_DAYS} days). Ask for fatigue and next-step training advice.`,
-        auto_question: "评估我最近疲劳和下周负荷安排。",
+        auto_question: "Evaluate my recent fatigue and suggest next week's load progression.",
       };
 
       window.localStorage.setItem(TRAINING_HANDOFF_STORAGE_KEY, JSON.stringify(handoff));
@@ -517,12 +517,7 @@ export default function TrainingPage() {
   const selectedYear = calendarMonth.getFullYear();
 
   return (
-    <div className="min-h-screen bg-background overflow-hidden">
-      <div className="fixed inset-0 -z-10 overflow-hidden">
-        <div className="absolute top-0 left-1/4 w-[500px] h-[500px] bg-red-500/5 rounded-full blur-[100px]" />
-        <div className="absolute bottom-0 right-1/4 w-[400px] h-[400px] bg-amber-500/5 rounded-full blur-[80px]" />
-      </div>
-
+    <div className="min-h-screen bg-background">
       <TopNav activeHref="/training" links={[...TRAINING_NAV_LINKS]} />
 
       <main className="pt-28 pb-12">
@@ -619,7 +614,7 @@ export default function TrainingPage() {
                 type="button"
                 onClick={handleAnalyzeRecentTraining}
                 disabled={isPreparingAnalysis}
-                className="mt-4 w-full rounded-2xl bg-gradient-to-r from-red-600 to-red-700 px-4 py-3 text-sm font-semibold text-white disabled:opacity-60"
+                className="mt-4 w-full rounded-2xl bg-red-600 px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:opacity-60"
               >
                 {isPreparingAnalysis ? "Preparing Training Context..." : "Analyze Recent Training in AI Coach"}
               </button>
@@ -869,7 +864,7 @@ export default function TrainingPage() {
                       type="button"
                       onClick={handleSave}
                       disabled={isSaving}
-                      className="rounded-xl bg-gradient-to-r from-red-600 to-red-700 px-5 py-2.5 text-sm font-semibold text-white disabled:opacity-60"
+                      className="rounded-xl bg-red-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:opacity-60"
                     >
                       {isSaving ? "Saving..." : selectedLogId ? "Update Entry" : "Save Entry"}
                     </button>

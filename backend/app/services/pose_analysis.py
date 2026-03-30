@@ -1,26 +1,43 @@
 """
-Pose Analysis Service using MediaPipe.
+Pose analysis service using MediaPipe Pose Landmarker.
 
-This service provides human pose detection and visualization for fencing videos.
+This service detects up to two athletes, keeps them in stable left/right slots,
+and generates overlay assets and normalized pose data for downstream reports.
 """
 
+from __future__ import annotations
+
 import json
-import cv2
-from pathlib import Path
-from typing import Optional, Dict, Any
+import shutil
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Optional
+
+import cv2
+import httpx
 import mediapipe as mp
 from mediapipe.framework.formats import landmark_pb2
+from mediapipe.tasks.python.core.base_options import BaseOptions
+from mediapipe.tasks.python.vision.core.vision_task_running_mode import VisionTaskRunningMode
+from mediapipe.tasks.python.vision.pose_landmarker import PoseLandmarker, PoseLandmarkerOptions
 
 from app.core.config import settings
 
 
+SCHEMA_VERSION = 2
+POSE_TRACK_SLOTS = ("left", "right")
+POSE_LANDMARKER_NAME = "pose_landmarker_heavy.task"
+POSE_LANDMARKER_NUM_POSES = 2
+POSE_DETECTION_THRESHOLD = 0.45
+DUAL_SLOT_LOCK_THRESHOLD = 2
+TRACK_MEMORY_MAX_MISSES = 24
+
+
 class PoseAnalysisService:
-    """Service for detecting and analyzing human pose in videos."""
+    """Service for detecting and analyzing human pose in fencing videos."""
+
     FIXED_SAMPLE_INTERVAL = 1
 
-    # MediaPipe Pose landmark indices
-    # https://google.github.io/mediapipe/solutions/pose.html
     LANDMARK_NAMES = [
         "nose", "left_eye_inner", "left_eye", "left_eye_outer",
         "right_eye_inner", "right_eye", "right_eye_outer",
@@ -36,225 +53,583 @@ class PoseAnalysisService:
         "left_knee", "right_knee",
         "left_ankle", "right_ankle",
         "left_heel", "right_heel",
-        "left_foot_index", "right_foot_index"
+        "left_foot_index", "right_foot_index",
     ]
 
-    # Connections for drawing skeleton
     POSE_CONNECTIONS = [
-        # Face
         (0, 1), (0, 2), (1, 3), (2, 4),
         (4, 6), (3, 5), (5, 6),
         (9, 10),
-        # Body
-        (11, 12),  # Shoulders
-        (11, 13), (13, 15),  # Left arm
-        (15, 17), (15, 19), (15, 21), (17, 19),  # Left wrist
-        (12, 14), (14, 16),  # Right arm
-        (16, 18), (16, 20), (16, 22), (18, 20),  # Right wrist
-        (11, 23), (12, 24),  # Torso
+        (11, 12),
+        (11, 13), (13, 15),
+        (15, 17), (15, 19), (15, 21), (17, 19),
+        (12, 14), (14, 16),
+        (16, 18), (16, 20), (16, 22), (18, 20),
+        (11, 23), (12, 24),
         (23, 24),
-        (23, 25), (25, 27),  # Left leg
+        (23, 25), (25, 27),
         (27, 29), (27, 31), (29, 31),
-        (24, 26), (26, 28),  # Right leg
-        (28, 30), (28, 32), (30, 32)
+        (24, 26), (26, 28),
+        (28, 30), (28, 32), (30, 32),
     ]
 
-    def __init__(self):
+    SLOT_COLORS = {
+        "left": ((38, 38, 220), (125, 211, 252)),
+        "right": ((16, 185, 129), (253, 224, 71)),
+    }
+
+    def __init__(self) -> None:
         self.upload_dir = Path(settings.VIDEO_UPLOAD_DIR)
         self.analysis_dir = self.upload_dir / "analyses"
         self.analysis_dir.mkdir(parents=True, exist_ok=True)
 
-        # Initialize MediaPipe Pose
-        self.mp_pose = mp.solutions.pose
         self.mp_drawing = mp.solutions.drawing_utils
-        self.mp_drawing_styles = mp.solutions.drawing_styles
-
-        # Pose detection parameters optimized for fencing
-        self.pose = self.mp_pose.Pose(
-            static_image_mode=False,
-            model_complexity=2,  # Most accurate model
-            smooth_landmarks=True,
-            enable_segmentation=False,
-            smooth_segmentation=False,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
+        self.pose_landmarker: Optional[PoseLandmarker] = None
+        self.model_path = Path(settings.POSE_LANDMARKER_MODEL_PATH)
+        self.model_url = settings.POSE_LANDMARKER_MODEL_URL
 
     def _get_analysis_dir(self, video_id: str) -> Path:
-        """Get the analysis directory for a video."""
         video_analysis_dir = self.analysis_dir / video_id / "pose"
         video_analysis_dir.mkdir(parents=True, exist_ok=True)
         return video_analysis_dir
 
     def _get_pose_data_path(self, video_id: str) -> Path:
-        """Get the path for pose data JSON file."""
         return self._get_analysis_dir(video_id) / "pose_data.json"
 
     def _get_overlay_video_path(self, video_id: str) -> Path:
-        """Get the path for pose overlay video."""
         return self._get_analysis_dir(video_id) / "pose_overlay.mp4"
+
+    def _ensure_model_asset(self) -> Path:
+        if self.model_path.exists():
+            return self.model_path
+
+        self.model_path.parent.mkdir(parents=True, exist_ok=True)
+        with httpx.stream("GET", self.model_url, follow_redirects=True, timeout=90.0) as response:
+            response.raise_for_status()
+            with open(self.model_path, "wb") as file_handle:
+                for chunk in response.iter_bytes():
+                    if chunk:
+                        file_handle.write(chunk)
+        return self.model_path
+
+    def _get_pose_landmarker(self) -> PoseLandmarker:
+        if self.pose_landmarker is not None:
+            return self.pose_landmarker
+
+        model_path = self._ensure_model_asset()
+        options = PoseLandmarkerOptions(
+            base_options=BaseOptions(model_asset_path=str(model_path)),
+            running_mode=VisionTaskRunningMode.VIDEO,
+            num_poses=POSE_LANDMARKER_NUM_POSES,
+            min_pose_detection_confidence=POSE_DETECTION_THRESHOLD,
+            min_pose_presence_confidence=POSE_DETECTION_THRESHOLD,
+            min_tracking_confidence=POSE_DETECTION_THRESHOLD,
+            output_segmentation_masks=False,
+        )
+        self.pose_landmarker = PoseLandmarker.create_from_options(options)
+        return self.pose_landmarker
+
+    def _compute_center_and_scale(self, landmarks: list[dict[str, float]]) -> tuple[float, float, float]:
+        visible_points = [
+            landmark
+            for landmark in landmarks
+            if float(landmark.get("visibility", 0.0)) >= 0.2
+        ]
+        if not visible_points:
+            visible_points = landmarks
+
+        xs = [float(landmark.get("x", 0.0)) for landmark in visible_points]
+        ys = [float(landmark.get("y", 0.0)) for landmark in visible_points]
+        if not xs or not ys:
+            return 0.5, 0.5, 0.0
+
+        center_x = sum(xs) / len(xs)
+        center_y = sum(ys) / len(ys)
+        scale = max(max(xs) - min(xs), max(ys) - min(ys))
+        return center_x, center_y, scale
+
+    def _normalize_detection(self, athlete_landmarks: list[Any]) -> dict[str, Any]:
+        normalized_landmarks: list[dict[str, float]] = []
+        visibility_values: list[float] = []
+
+        for index, landmark in enumerate(athlete_landmarks):
+            visibility = float(getattr(landmark, "visibility", 0.0) or 0.0)
+            normalized_landmarks.append(
+                {
+                    "name": self.LANDMARK_NAMES[index] if index < len(self.LANDMARK_NAMES) else f"landmark_{index}",
+                    "x": float(getattr(landmark, "x", 0.0) or 0.0),
+                    "y": float(getattr(landmark, "y", 0.0) or 0.0),
+                    "z": float(getattr(landmark, "z", 0.0) or 0.0),
+                    "visibility": visibility,
+                }
+            )
+            visibility_values.append(visibility)
+
+        center_x, center_y, scale = self._compute_center_and_scale(normalized_landmarks)
+        confidence = sum(visibility_values) / len(visibility_values) if visibility_values else 0.0
+        return {
+            "landmarks": normalized_landmarks,
+            "visibility": visibility_values,
+            "confidence": confidence,
+            "center_x": center_x,
+            "center_y": center_y,
+            "scale": scale,
+        }
+
+    def _sort_detections(self, detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(
+            detections,
+            key=lambda item: (item.get("confidence", 0.0), -(item.get("scale", 0.0))),
+            reverse=True,
+        )[:POSE_LANDMARKER_NUM_POSES]
+
+    def _slot_cost(
+        self,
+        slot: str,
+        detection: dict[str, Any],
+        memory: dict[str, Optional[dict[str, float]]],
+    ) -> float:
+        last_seen = memory.get(slot)
+        center_x = float(detection.get("center_x", 0.5))
+        center_y = float(detection.get("center_y", 0.5))
+        scale = float(detection.get("scale", 0.0))
+
+        if last_seen is None:
+            anchor_x = 0.3 if slot == "left" else 0.7
+            return abs(center_x - anchor_x)
+
+        distance_cost = ((center_x - last_seen["center_x"]) ** 2 + (center_y - last_seen["center_y"]) ** 2) ** 0.5
+        scale_cost = abs(scale - last_seen["scale"]) * 0.35
+        miss_penalty = float(last_seen.get("missed_frames", 0.0)) * 0.01
+        return distance_cost + scale_cost + miss_penalty
+
+    def _assign_slots(
+        self,
+        detections: list[dict[str, Any]],
+        slot_memory: dict[str, Optional[dict[str, float]]],
+        slots_locked: bool,
+        stable_dual_frames: int,
+    ) -> tuple[dict[str, dict[str, Any]], bool, int]:
+        assignments: dict[str, dict[str, Any]] = {}
+        ranked = self._sort_detections(detections)
+
+        if not ranked:
+            return assignments, slots_locked, 0
+
+        if not slots_locked and len(ranked) >= 2:
+            ordered = sorted(ranked[:2], key=lambda item: item.get("center_x", 0.5))
+            stable_dual_frames += 1
+            assignments = {"left": ordered[0], "right": ordered[1]}
+            if stable_dual_frames >= DUAL_SLOT_LOCK_THRESHOLD:
+                slots_locked = True
+            return assignments, slots_locked, stable_dual_frames
+
+        stable_dual_frames = 0
+
+        if not slots_locked:
+            single = ranked[0]
+            inferred_slot = "left" if float(single.get("center_x", 0.5)) <= 0.5 else "right"
+            assignments[inferred_slot] = single
+            return assignments, slots_locked, stable_dual_frames
+
+        if len(ranked) == 1:
+            single = ranked[0]
+            left_cost = self._slot_cost("left", single, slot_memory)
+            right_cost = self._slot_cost("right", single, slot_memory)
+            assignments["left" if left_cost <= right_cost else "right"] = single
+            return assignments, slots_locked, stable_dual_frames
+
+        left_first_cost = self._slot_cost("left", ranked[0], slot_memory) + self._slot_cost("right", ranked[1], slot_memory)
+        right_first_cost = self._slot_cost("left", ranked[1], slot_memory) + self._slot_cost("right", ranked[0], slot_memory)
+
+        if left_first_cost <= right_first_cost:
+            assignments["left"] = ranked[0]
+            assignments["right"] = ranked[1]
+        else:
+            assignments["left"] = ranked[1]
+            assignments["right"] = ranked[0]
+        return assignments, slots_locked, stable_dual_frames
+
+    def _build_frame_athletes(
+        self,
+        assignments: dict[str, dict[str, Any]],
+        slot_memory: dict[str, Optional[dict[str, float]]],
+        player_stats: dict[str, dict[str, float]],
+    ) -> list[dict[str, Any]]:
+        frame_athletes: list[dict[str, Any]] = []
+        for slot in POSE_TRACK_SLOTS:
+            assigned = assignments.get(slot)
+            if assigned is None:
+                last_seen = slot_memory.get(slot)
+                if last_seen is not None:
+                    last_seen["missed_frames"] = float(last_seen.get("missed_frames", 0.0)) + 1.0
+                    if last_seen["missed_frames"] > TRACK_MEMORY_MAX_MISSES:
+                        slot_memory[slot] = None
+                continue
+
+            slot_memory[slot] = {
+                "center_x": float(assigned.get("center_x", 0.5)),
+                "center_y": float(assigned.get("center_y", 0.5)),
+                "scale": float(assigned.get("scale", 0.0)),
+                "missed_frames": 0.0,
+            }
+            player_stats[slot]["coverage_frames"] += 1.0
+            player_stats[slot]["confidence_total"] += float(assigned.get("confidence", 0.0))
+
+            frame_athletes.append(
+                {
+                    "slot": slot,
+                    "track_id": slot,
+                    "landmarks": assigned["landmarks"],
+                    "visibility": assigned.get("visibility", []),
+                    "confidence": assigned.get("confidence", 0.0),
+                    "center_x": assigned.get("center_x", 0.5),
+                    "center_y": assigned.get("center_y", 0.5),
+                    "present": True,
+                }
+            )
+
+        return frame_athletes
+
+    def _summarize_players(
+        self,
+        player_stats: dict[str, dict[str, float]],
+        frame_count: int,
+    ) -> list[dict[str, Any]]:
+        players: list[dict[str, Any]] = []
+        safe_frame_count = max(frame_count, 1)
+        for slot in POSE_TRACK_SLOTS:
+            coverage_frames = int(player_stats[slot]["coverage_frames"])
+            if coverage_frames <= 0:
+                continue
+            average_confidence = player_stats[slot]["confidence_total"] / coverage_frames
+            players.append(
+                {
+                    "slot": slot,
+                    "track_id": slot,
+                    "coverage_frames": coverage_frames,
+                    "coverage_ratio": coverage_frames / safe_frame_count,
+                    "average_confidence": average_confidence,
+                    "display_name": f"{slot.capitalize()} Athlete",
+                }
+            )
+        return players
+
+    def normalize_pose_data(self, pose_data: dict[str, Any]) -> dict[str, Any]:
+        if not pose_data:
+            return pose_data
+
+        if pose_data.get("schema_version") == SCHEMA_VERSION and all(
+            isinstance(frame.get("athletes", []), list) for frame in pose_data.get("pose_sequence", [])
+        ):
+            if pose_data.get("players"):
+                return pose_data
+
+            normalized_stats = {slot: {"coverage_frames": 0.0, "confidence_total": 0.0} for slot in POSE_TRACK_SLOTS}
+            for frame in pose_data.get("pose_sequence", []):
+                for athlete in frame.get("athletes", []):
+                    slot = athlete.get("slot")
+                    if slot not in normalized_stats:
+                        continue
+                    normalized_stats[slot]["coverage_frames"] += 1.0
+                    normalized_stats[slot]["confidence_total"] += float(athlete.get("confidence", 0.0) or 0.0)
+
+            pose_data["players"] = self._summarize_players(
+                normalized_stats,
+                int(pose_data.get("video_properties", {}).get("frame_count", 0) or 0),
+            )
+            return pose_data
+
+        pose_sequence = pose_data.get("pose_sequence", [])
+        normalized_sequence: list[dict[str, Any]] = []
+        player_stats = {slot: {"coverage_frames": 0.0, "confidence_total": 0.0} for slot in POSE_TRACK_SLOTS}
+
+        for frame in pose_sequence:
+            landmarks = frame.get("landmarks", [])
+            visibility = [
+                float(landmark.get("visibility", 0.0) or 0.0)
+                for landmark in landmarks
+                if isinstance(landmark, dict)
+            ]
+            confidence = sum(visibility) / len(visibility) if visibility else 0.0
+            center_x, center_y, _ = self._compute_center_and_scale(landmarks)
+            if landmarks:
+                player_stats["left"]["coverage_frames"] += 1.0
+                player_stats["left"]["confidence_total"] += confidence
+
+            normalized_sequence.append(
+                {
+                    "frame_index": frame.get("frame_index", 0),
+                    "timestamp": frame.get("timestamp", 0),
+                    "athletes": [
+                        {
+                            "slot": "left",
+                            "track_id": "left",
+                            "landmarks": landmarks,
+                            "visibility": visibility,
+                            "confidence": confidence,
+                            "center_x": center_x,
+                            "center_y": center_y,
+                            "present": bool(landmarks),
+                        }
+                    ] if landmarks else [],
+                }
+            )
+
+        normalized = {
+            "video_id": pose_data.get("video_id"),
+            "video_path": pose_data.get("video_path"),
+            "analysis_type": pose_data.get("analysis_type", "pose"),
+            "timestamp": pose_data.get("timestamp", datetime.now().isoformat()),
+            "schema_version": SCHEMA_VERSION,
+            "detector_info": pose_data.get("detector_info") or {
+                "provider": "mediapipe-legacy",
+                "model": "mp.solutions.pose",
+                "num_poses": 1,
+                "model_asset": None,
+            },
+            "video_properties": pose_data.get("video_properties", {}),
+            "processing": pose_data.get("processing", {}),
+            "players": self._summarize_players(
+                player_stats,
+                int(pose_data.get("video_properties", {}).get("frame_count", 0) or 0),
+            ),
+            "pose_sequence": normalized_sequence,
+            "pose_data_path": pose_data.get("pose_data_path"),
+        }
+        return normalized
+
+    def get_available_slots(self, pose_data: dict[str, Any]) -> list[str]:
+        normalized = self.normalize_pose_data(pose_data)
+        slots = [
+            str(player.get("slot"))
+            for player in normalized.get("players", [])
+            if player.get("slot") in POSE_TRACK_SLOTS
+        ]
+        if slots:
+            return slots
+
+        discovered_slots: list[str] = []
+        for frame in normalized.get("pose_sequence", []):
+            for athlete in frame.get("athletes", []):
+                slot = athlete.get("slot")
+                if slot in POSE_TRACK_SLOTS and slot not in discovered_slots:
+                    discovered_slots.append(slot)
+        return discovered_slots
+
+    def extract_slot_pose_data(self, pose_data: dict[str, Any], athlete_slot: Optional[str]) -> dict[str, Any]:
+        normalized = self.normalize_pose_data(pose_data)
+        requested_slot = athlete_slot or "left"
+        available_slots = self.get_available_slots(normalized)
+        if requested_slot not in available_slots:
+            if requested_slot == "right" and "left" in available_slots and len(available_slots) == 1:
+                raise ValueError("Right athlete data is not available for this video.")
+            requested_slot = available_slots[0] if available_slots else requested_slot
+
+        player_summary = next(
+            (player for player in normalized.get("players", []) if player.get("slot") == requested_slot),
+            None,
+        )
+
+        extracted_sequence: list[dict[str, Any]] = []
+        for frame in normalized.get("pose_sequence", []):
+            matched_athlete = next(
+                (athlete for athlete in frame.get("athletes", []) if athlete.get("slot") == requested_slot),
+                None,
+            )
+            if not matched_athlete:
+                continue
+            extracted_sequence.append(
+                {
+                    "frame_index": frame.get("frame_index", 0),
+                    "timestamp": frame.get("timestamp", 0),
+                    "landmarks": matched_athlete.get("landmarks", []),
+                    "visibility": matched_athlete.get("visibility", []),
+                    "slot": requested_slot,
+                    "track_id": matched_athlete.get("track_id", requested_slot),
+                    "confidence": matched_athlete.get("confidence"),
+                }
+            )
+
+        return {
+            "video_id": normalized.get("video_id"),
+            "video_path": normalized.get("video_path"),
+            "analysis_type": normalized.get("analysis_type", "pose"),
+            "timestamp": normalized.get("timestamp"),
+            "schema_version": 1,
+            "detector_info": normalized.get("detector_info"),
+            "video_properties": normalized.get("video_properties", {}),
+            "processing": {
+                **normalized.get("processing", {}),
+                "selected_athlete_slot": requested_slot,
+                "selected_athlete_track_id": player_summary.get("track_id") if player_summary else requested_slot,
+            },
+            "player_summary": player_summary,
+            "pose_sequence": extracted_sequence,
+            "pose_data_path": normalized.get("pose_data_path"),
+        }
 
     def analyze_pose(
         self,
         video_path: str,
         video_id: str,
-        sample_interval: int = 1
-    ) -> Dict[str, Any]:
-        """
-        Analyze pose in a video file.
-
-        Args:
-            video_path: Path to the video file
-            video_id: Unique identifier for the video
-            sample_interval: Deprecated, sampling is fixed to every frame for best quality.
-
-        Returns:
-            Dictionary containing analysis results and paths
-        """
-        # Open video with proper resource cleanup
+        sample_interval: int = 1,
+    ) -> dict[str, Any]:
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise ValueError(f"Cannot open video file: {video_path}")
 
+        landmarker = self._get_pose_landmarker()
+
         try:
-            # Get video properties
             fps = int(cap.get(cv2.CAP_PROP_FPS))
             frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             duration = frame_count / fps if fps > 0 else 0
 
-            # Process frames
-            pose_sequence = []
+            pose_sequence: list[dict[str, Any]] = []
             frame_idx = 0
             processed_frames = 0
+            effective_interval = self.FIXED_SAMPLE_INTERVAL
+
+            slots_locked = False
+            stable_dual_frames = 0
+            slot_memory: dict[str, Optional[dict[str, float]]] = {slot: None for slot in POSE_TRACK_SLOTS}
+            player_stats = {slot: {"coverage_frames": 0.0, "confidence_total": 0.0} for slot in POSE_TRACK_SLOTS}
 
             print(f"Processing video: {video_path}")
             print(f"Total frames: {frame_count}, FPS: {fps}, Duration: {duration:.2f}s")
-
-            effective_interval = self.FIXED_SAMPLE_INTERVAL
 
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret:
                     break
 
-                # Process every Nth frame
                 if frame_idx % effective_interval == 0:
-                    # Convert to RGB for MediaPipe
                     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+                    timestamp_ms = int((frame_idx * 1000) / fps) if fps > 0 else frame_idx * 33
+                    result = landmarker.detect_for_video(mp_image, timestamp_ms)
+                    detections = [
+                        self._normalize_detection(athlete_landmarks)
+                        for athlete_landmarks in result.pose_landmarks
+                    ]
+                    assignments, slots_locked, stable_dual_frames = self._assign_slots(
+                        detections,
+                        slot_memory,
+                        slots_locked,
+                        stable_dual_frames,
+                    )
+                    frame_athletes = self._build_frame_athletes(assignments, slot_memory, player_stats)
 
-                    # Detect pose
-                    results = self.pose.process(rgb_frame)
-
-                    if results.pose_landmarks:
-                        # Extract landmark data
-                        landmarks = results.pose_landmarks.landmark
-                        pose_data = {
-                            "frame_index": frame_idx,
-                            "timestamp": frame_idx / fps if fps > 0 else 0,
-                            "landmarks": [
-                                {
-                                    "name": self.LANDMARK_NAMES[i] if i < len(self.LANDMARK_NAMES) else f"landmark_{i}",
-                                    "x": lm.x,
-                                    "y": lm.y,
-                                    "z": lm.z,
-                                    "visibility": lm.visibility
-                                }
-                                for i, lm in enumerate(landmarks)
-                            ]
-                        }
-                        pose_sequence.append(pose_data)
+                    if frame_athletes:
+                        pose_sequence.append(
+                            {
+                                "frame_index": frame_idx,
+                                "timestamp": frame_idx / fps if fps > 0 else 0,
+                                "athletes": frame_athletes,
+                            }
+                        )
                         processed_frames += 1
 
-                    # Print progress
-                    if processed_frames % 10 == 0:
-                        print(f"Processed {processed_frames} frames...")
+                    if processed_frames and processed_frames % 10 == 0:
+                        print(f"Processed {processed_frames} pose frames...")
 
                 frame_idx += 1
         finally:
             cap.release()
 
-        # Save pose data
         pose_data_path = self._get_pose_data_path(video_id)
         analysis_result = {
             "video_id": video_id,
             "video_path": video_path,
             "analysis_type": "pose",
             "timestamp": datetime.now().isoformat(),
+            "schema_version": SCHEMA_VERSION,
+            "detector_info": {
+                "provider": "mediapipe-tasks",
+                "model": "pose_landmarker_heavy",
+                "num_poses": POSE_LANDMARKER_NUM_POSES,
+                "model_asset": self.model_path.name if self.model_path else POSE_LANDMARKER_NAME,
+            },
             "video_properties": {
                 "fps": fps,
                 "frame_count": frame_count,
                 "width": width,
                 "height": height,
-                "duration": duration
+                "duration": duration,
             },
             "processing": {
                 "sample_interval": effective_interval,
                 "processed_frames": processed_frames,
-                "total_frames": frame_count
+                "total_frames": frame_count,
             },
+            "players": self._summarize_players(player_stats, frame_count),
             "pose_sequence": pose_sequence,
-            "pose_data_path": str(pose_data_path)
+            "pose_data_path": str(pose_data_path),
         }
 
-        with open(pose_data_path, "w", encoding="utf-8") as f:
-            json.dump(analysis_result, f, indent=2)
+        with open(pose_data_path, "w", encoding="utf-8") as file_handle:
+            json.dump(analysis_result, file_handle, ensure_ascii=False, indent=2)
 
         print(f"Pose analysis complete. Processed {processed_frames} frames.")
         print(f"Pose data saved to: {pose_data_path}")
-
         return analysis_result
+
+    def _draw_athlete_landmarks(self, frame: Any, athlete: dict[str, Any]) -> None:
+        landmarks = athlete.get("landmarks", [])
+        if not landmarks:
+            return
+
+        landmark_list = landmark_pb2.NormalizedLandmarkList()
+        for landmark in landmarks:
+            point = landmark_list.landmark.add()
+            point.x = float(landmark.get("x", 0.0))
+            point.y = float(landmark.get("y", 0.0))
+            point.z = float(landmark.get("z", 0.0))
+            point.visibility = float(landmark.get("visibility", 0.0))
+
+        slot = athlete.get("slot", "left")
+        connection_color, landmark_color = self.SLOT_COLORS.get(slot, self.SLOT_COLORS["left"])
+        self.mp_drawing.draw_landmarks(
+            frame,
+            landmark_list,
+            self.POSE_CONNECTIONS,
+            landmark_drawing_spec=self.mp_drawing.DrawingSpec(color=landmark_color, thickness=2, circle_radius=2),
+            connection_drawing_spec=self.mp_drawing.DrawingSpec(color=connection_color, thickness=3, circle_radius=2),
+        )
 
     def generate_pose_overlay(
         self,
         video_path: str,
         video_id: str,
-        pose_data: Optional[Dict[str, Any]] = None,
+        pose_data: Optional[dict[str, Any]] = None,
         sample_interval: int = 5,
-        output_format: str = "mp4"
+        output_format: str = "mp4",
     ) -> str:
-        """
-        Generate a video with pose skeleton overlay.
+        del sample_interval, output_format
 
-        Args:
-            video_path: Path to the input video
-            video_id: Unique identifier for the video
-            pose_data: Pre-computed pose data (if None, will run detection)
-            sample_interval: Process every N frames
-            output_format: Output format (mp4, avi)
-
-        Returns:
-            Path to the generated overlay video
-        """
-        # Load pose data if not provided
         if pose_data is None:
-            pose_data_path = self._get_pose_data_path(video_id)
-            if pose_data_path.exists():
-                with open(pose_data_path, encoding="utf-8") as f:
-                    pose_data = json.load(f)
-            else:
-                # Run pose analysis first
-                pose_data = self.analyze_pose(video_path, video_id, sample_interval)
+            pose_data = self.get_pose_data(video_id)
+            if pose_data is None:
+                pose_data = self.analyze_pose(video_path, video_id)
 
-        # Create pose index for quick lookup
+        normalized_pose_data = self.normalize_pose_data(pose_data)
         pose_by_frame = {
-            p["frame_index"]: p for p in pose_data.get("pose_sequence", [])
+            frame["frame_index"]: frame for frame in normalized_pose_data.get("pose_sequence", [])
         }
 
-        # Open input video
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise ValueError(f"Cannot open video file: {video_path}")
 
-        # Get video properties
         fps = int(cap.get(cv2.CAP_PROP_FPS))
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        # Setup video writer
         output_path = self._get_overlay_video_path(video_id)
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         out = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
 
         frame_idx = 0
@@ -263,28 +638,10 @@ class PoseAnalysisService:
             if not ret:
                 break
 
-            # Check if we have pose data for this frame
-            if frame_idx in pose_by_frame:
-                pose_frame = pose_by_frame[frame_idx]
-
-                # Convert landmarks to MediaPipe format
-                landmarks = pose_frame["landmarks"]
-                landmark_list = landmark_pb2.NormalizedLandmarkList()
-
-                for lm in landmarks:
-                    landmark = landmark_list.landmark.add()
-                    landmark.x = lm["x"]
-                    landmark.y = lm["y"]
-                    landmark.z = lm.get("z", 0)
-                    landmark.visibility = lm.get("visibility", 1.0)
-
-                # Draw pose on frame
-                self.mp_drawing.draw_landmarks(
-                    frame,
-                    landmark_list,
-                    self.mp_pose.POSE_CONNECTIONS,
-                    landmark_drawing_spec=self.mp_drawing_styles.get_default_pose_landmarks_style()
-                )
+            pose_frame = pose_by_frame.get(frame_idx)
+            if pose_frame:
+                for athlete in pose_frame.get("athletes", []):
+                    self._draw_athlete_landmarks(frame, athlete)
 
             out.write(frame)
             frame_idx += 1
@@ -295,20 +652,35 @@ class PoseAnalysisService:
         print(f"Pose overlay video saved to: {output_path}")
         return str(output_path)
 
-    def get_pose_data(self, video_id: str) -> Optional[Dict[str, Any]]:
-        """Get pose analysis data for a video."""
+    def get_pose_data(self, video_id: str) -> Optional[dict[str, Any]]:
         pose_data_path = self._get_pose_data_path(video_id)
-        if pose_data_path.exists():
-            with open(pose_data_path, encoding="utf-8") as f:
-                return json.load(f)
-        return None
+        if not pose_data_path.exists():
+            return None
+
+        with open(pose_data_path, encoding="utf-8") as file_handle:
+            raw_pose_data = json.load(file_handle)
+        return self.normalize_pose_data(raw_pose_data)
 
     def get_overlay_path(self, video_id: str) -> Optional[str]:
-        """Get the path to the pose overlay video."""
         overlay_path = self._get_overlay_video_path(video_id)
         if overlay_path.exists():
             return str(overlay_path)
         return None
 
-# Singleton instance
+    def delete_analysis_assets(self, video_id: str) -> dict[str, Any]:
+        video_analysis_dir = self.analysis_dir / video_id
+        removed = False
+        try:
+            if video_analysis_dir.exists():
+                shutil.rmtree(video_analysis_dir)
+                removed = True
+        except OSError:
+            removed = False
+
+        return {
+            "video_id": video_id,
+            "deleted_analysis_dir": removed,
+        }
+
+
 pose_analysis_service = PoseAnalysisService()

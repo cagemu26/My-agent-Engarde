@@ -1,9 +1,41 @@
 "use client";
 
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState, useRef, useCallback, useEffect, useMemo } from "react";
-import { authFetch, buildApiUrl, buildAuthedApiUrl } from "@/lib/api";
+import {
+  ANALYSIS_REPORT_UPDATED_EVENT,
+  clearCachedAnalysisReports,
+  ensureAnalysisReport,
+  parseAnalysisReportCacheKey,
+  readCachedAnalysisReport,
+  startAnalysisReportJob,
+  waitForAnalysisReportJob,
+} from "@/lib/analysis-report";
+import {
+  startPoseAnalysisJob,
+  waitForPoseAnalysisJob,
+  type PoseAnalysisResult,
+} from "@/lib/pose-analysis-job";
+import { authFetch } from "@/lib/api";
+import {
+  SESSION_META,
+  SESSION_TYPE_CHAT,
+  SESSION_TYPE_TRAINING,
+  SESSION_TYPE_VIDEO,
+  type SessionType,
+  normalizeSessionType,
+} from "@/lib/chat-session";
+import {
+  getAthleteSlotLabel,
+  getAthleteSlotShortLabel,
+  getAvailableAthleteSlots,
+  getDefaultAthleteSlot,
+  getSlotPoseFrames,
+  hasDualAthletePose,
+  type AthleteSlot,
+  type PoseData,
+} from "@/lib/pose-data";
 import { ChatMarkdown } from "@/components/chat-markdown";
 import { ReportMarkdown } from "@/components/report-markdown";
 import { TopNav } from "@/components/top-nav";
@@ -11,14 +43,6 @@ import { TopNav } from "@/components/top-nav";
 interface Message {
   role: "user" | "assistant";
   content: string;
-}
-
-interface PoseAnalysisResult {
-  video_id: string;
-  message: string;
-  pose_data_path: string;
-  processed_frames: number;
-  total_frames: number;
 }
 
 interface VideoFile {
@@ -53,23 +77,10 @@ interface HistoryItem {
   upload_time: string;
 }
 
-interface PoseData {
-  pose_sequence: Array<{
-    frame_index: number;
-    landmarks: number[][];
-    visibility: number[];
-  }>;
-  video_properties: {
-    width: number;
-    height: number;
-    fps: number;
-    frame_count: number;
-  };
-}
-
 interface AnalysisReportRecord {
   report_id: string;
   video_id: string;
+  athlete_slot?: AthleteSlot | null;
   report: string;
   summary: string;
   status: string;
@@ -90,6 +101,7 @@ interface OverflowMeta {
 interface ContextStatusMeta {
   video_id: string;
   video_title: string;
+  athlete_slot: AthleteSlot;
   mode: "full_pose";
   overflow: OverflowMeta;
   updated_at: string;
@@ -97,6 +109,7 @@ interface ContextStatusMeta {
 
 interface ChatContextPack {
   video_id: string;
+  athlete_slot: AthleteSlot;
   mode: "full_pose";
   metadata: {
     title: string;
@@ -119,12 +132,44 @@ interface ChatContextPack {
 
 interface VideoQASession {
   video_id: string;
+  session_id?: string | null;
   messages: Message[];
   context_summary: string;
   context_status: ContextStatusMeta | null;
   suggested_prompts: string[];
   needs_full_context: boolean;
   updated_at: string;
+}
+
+interface ChatSessionRecord {
+  id: string;
+  video_id?: string | null;
+  session_type?: SessionType;
+  title?: string | null;
+  context_summary?: string | null;
+  created_at: string;
+  updated_at: string;
+  last_message_at?: string | null;
+  message_count: number;
+}
+
+interface ChatSessionMessageRecord {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+}
+
+interface ChatSessionDetailRecord extends ChatSessionRecord {
+  messages: ChatSessionMessageRecord[];
+}
+
+interface ChatSessionDeleteResponse {
+  deleted_scope: "session_only" | "video_full";
+  deleted_session_count: number;
+  deleted_message_count: number;
+  video_id?: string | null;
+  message: string;
 }
 
 interface ExternalContextStatus {
@@ -150,7 +195,7 @@ type AnalyzeTab = "analyze" | "chat" | "history";
 interface HistoryGroup {
   key: "today" | "week" | "earlier";
   label: string;
-  items: HistoryItem[];
+  items: ChatSessionRecord[];
 }
 
 const SIDEBAR_STORAGE_KEY = "engarde.analyze.historySidebarCollapsed";
@@ -158,6 +203,7 @@ const VIDEO_SESSION_STORAGE_PREFIX = "video_qa_session:";
 const TRAINING_HANDOFF_STORAGE_KEY = "engarde.training.handoff";
 const MAX_SESSION_MESSAGES = 30;
 const MAX_SESSION_VIDEOS = 20;
+const MAX_BACKEND_SESSION_MESSAGES = 80;
 const MAX_CONTEXT_CHARS = 22000;
 const TARGET_CONTEXT_FRAMES = 160;
 const MIN_CONTEXT_FRAMES = 52;
@@ -190,8 +236,8 @@ const KEY_POINT_INDEXES: Record<string, number> = {
 };
 
 const ANALYSIS_MODES = [
-  { value: "pose", label: "Pose Detection", description: "MediaPipe skeleton overlay", icon: "🦴" },
-  { value: "action", label: "Action Recognition", description: "CNN-based detection (Coming Soon)", icon: "🎯" },
+  { value: "pose", label: "Pose Detection", description: "See body posture and movement throughout the bout.", icon: "🦴" },
+  { value: "action", label: "Action Recognition", description: "Identify key fencing actions automatically (Coming Soon).", icon: "🎯" },
 ];
 
 const WEAPON_TYPES = [
@@ -232,10 +278,12 @@ const buildReportContextText = (report: AnalysisReportRecord | null): string => 
   if (!report) return "";
   const summary = report.summary?.trim();
   const body = report.report?.trim();
+  const slotLabel = report.athlete_slot ? getAthleteSlotLabel(report.athlete_slot) : "";
   if (summary && body) {
-    return `Summary: ${summary}\n\n${body}`;
+    return `${slotLabel ? `Athlete Slot: ${slotLabel}\n` : ""}Summary: ${summary}\n\n${body}`;
   }
-  return summary || body || "";
+  const merged = summary || body || "";
+  return slotLabel && merged ? `Athlete Slot: ${slotLabel}\n${merged}` : merged;
 };
 
 const sampleEvenly = <T,>(items: T[], count: number): T[] => {
@@ -303,6 +351,27 @@ const getWeaponLabel = (weapon: string) => {
   return labels[weapon?.toLowerCase()] || weapon || "Unknown";
 };
 
+const getSessionTimestamp = (session: ChatSessionRecord) => {
+  const value = session.last_message_at || session.updated_at || session.created_at;
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+};
+
+const parseApiError = async (response: Response, fallback: string): Promise<string> => {
+  try {
+    const data = (await response.json()) as { detail?: string; message?: string; error?: string };
+    return data.detail || data.message || data.error || fallback;
+  } catch {
+    return fallback;
+  }
+};
+
+const getSessionDotColor = (sessionType: SessionType) => {
+  if (sessionType === SESSION_TYPE_VIDEO) return "#3B82F6";
+  if (sessionType === SESSION_TYPE_TRAINING) return "#F97316";
+  return "#22C55E";
+};
+
 const getWeaponColor = (weapon: string) => {
   const colors: Record<string, string> = {
     foil: "#F97316",
@@ -321,6 +390,7 @@ const getResultLabel = (matchResult: string) => {
 };
 
 function AnalyzeContent() {
+  const router = useRouter();
   const searchParams = useSearchParams();
 
   const [activeTab, setActiveTab] = useState<AnalyzeTab>("chat");
@@ -352,16 +422,21 @@ function AnalyzeContent() {
 
   const [historyVideos, setHistoryVideos] = useState<HistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
-  const [historyError, setHistoryError] = useState<string | null>(null);
-  const [historySearch, setHistorySearch] = useState("");
+  const [chatSessions, setChatSessions] = useState<ChatSessionRecord[]>([]);
+  const [chatSessionsLoading, setChatSessionsLoading] = useState(true);
+  const [chatSessionsError, setChatSessionsError] = useState<string | null>(null);
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
+  const [sessionSearch, setSessionSearch] = useState("");
 
   const [selectedHistoryVideoId, setSelectedHistoryVideoId] = useState<string | null>(null);
   const [historyDetail, setHistoryDetail] = useState<HistoryItem | null>(null);
   const [historyPoseData, setHistoryPoseData] = useState<PoseData | null>(null);
+  const [selectedHistoryAthleteSlot, setSelectedHistoryAthleteSlot] = useState<AthleteSlot>("left");
   const [historyReport, setHistoryReport] = useState<AnalysisReportRecord | null>(null);
   const [historyDetailLoading, setHistoryDetailLoading] = useState(false);
   const [historyDetailError, setHistoryDetailError] = useState<string | null>(null);
   const [historyReportLoading, setHistoryReportLoading] = useState(false);
+  const [historyReportAction, setHistoryReportAction] = useState<"load" | "generate" | null>(null);
   const [historyReportError, setHistoryReportError] = useState<string | null>(null);
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -371,6 +446,7 @@ function AnalyzeContent() {
   const [hasHandledTrainingHandoff, setHasHandledTrainingHandoff] = useState(false);
   const [pendingAutoQuestion, setPendingAutoQuestion] = useState<string | null>(null);
   const [activeChatVideoId, setActiveChatVideoId] = useState<string | null>(null);
+  const [activeChatSessionId, setActiveChatSessionId] = useState<string | null>(null);
   const [chatContextPack, setChatContextPack] = useState<ChatContextPack | null>(null);
   const [chatContextSummary, setChatContextSummary] = useState("");
   const [chatContextStatus, setChatContextStatus] = useState<ContextStatusMeta | null>(null);
@@ -381,10 +457,34 @@ function AnalyzeContent() {
   const [chatSuggestedPrompts, setChatSuggestedPrompts] = useState<string[]>(DEFAULT_QUICK_PROMPTS);
   const [needsFullContextForNextSend, setNeedsFullContextForNextSend] = useState(false);
   const [sessionHydrated, setSessionHydrated] = useState(false);
+  const [isDraftChatSession, setIsDraftChatSession] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const sessionSwitchRef = useRef(0);
+  const chatSessionSwitchRef = useRef(0);
+  const historyDetailRequestRef = useRef(0);
+  const contextTransitionRef = useRef(0);
+  const pendingUrlSessionIdRef = useRef<string | null>(null);
+  const suppressUrlSessionRestoreRef = useRef(false);
   const processingProgressTimerRef = useRef<number | null>(null);
+  const hasInitializedDefaultSessionRef = useRef(false);
+  const selectedHistoryVideoIdRef = useRef<string | null>(null);
+
+  const beginContextTransition = useCallback(() => {
+    const transitionId = contextTransitionRef.current + 1;
+    contextTransitionRef.current = transitionId;
+    setIsContextPreparing(true);
+    return transitionId;
+  }, []);
+
+  const historyAthleteSlots = useMemo(
+    () => getAvailableAthleteSlots(historyPoseData),
+    [historyPoseData],
+  );
+  const hasDualHistoryAthletes = useMemo(
+    () => hasDualAthletePose(historyPoseData),
+    [historyPoseData],
+  );
 
   const formatFileSize = (bytes: number) => {
     if (bytes < 1024) return `${bytes} B`;
@@ -419,17 +519,18 @@ function AnalyzeContent() {
     return () => stopProcessingProgress();
   }, [stopProcessingProgress]);
 
-  const extractPoseFrames = useCallback((poseData: PoseData | null) => {
-    if (!poseData?.pose_sequence) return [] as ChatContextPack["pose_frames"];
+  useEffect(() => {
+    selectedHistoryVideoIdRef.current = selectedHistoryVideoId;
+  }, [selectedHistoryVideoId]);
 
-    return poseData.pose_sequence
+  const extractPoseFrames = useCallback((poseData: PoseData | null, athleteSlot: AthleteSlot) => {
+    const slotFrames = getSlotPoseFrames(poseData, athleteSlot);
+    if (!slotFrames.length) return [] as ChatContextPack["pose_frames"];
+
+    return slotFrames
       .map((frame) => {
-        const landmarks = Array.isArray((frame as { landmarks?: unknown }).landmarks)
-          ? ((frame as { landmarks: unknown[] }).landmarks ?? [])
-          : [];
-        const visibilityArray = Array.isArray((frame as { visibility?: unknown }).visibility)
-          ? ((frame as { visibility: unknown[] }).visibility ?? [])
-          : [];
+        const landmarks = Array.isArray(frame.landmarks) ? frame.landmarks : [];
+        const visibilityArray = Array.isArray(frame.visibility) ? frame.visibility : [];
 
         const keyPoints: Record<string, { x: number; y: number; z: number; visibility: number }> = {};
 
@@ -459,9 +560,9 @@ function AnalyzeContent() {
         });
 
         return {
-          frame_index: safeNumber((frame as { frame_index?: unknown }).frame_index),
-          timestamp: (frame as { timestamp?: unknown }).timestamp !== undefined
-            ? roundTo(safeNumber((frame as { timestamp?: unknown }).timestamp), 2)
+          frame_index: safeNumber(frame.frame_index),
+          timestamp: frame.timestamp !== undefined
+            ? roundTo(safeNumber(frame.timestamp), 2)
             : null,
           key_points: keyPoints,
         };
@@ -470,9 +571,10 @@ function AnalyzeContent() {
   }, []);
 
   const buildContextSummary = useCallback(
-    (video: HistoryItem, reportExcerpt: string, overflow: OverflowMeta) => {
+    (video: HistoryItem, athleteSlot: AthleteSlot, reportExcerpt: string, overflow: OverflowMeta) => {
       const summaryLines = [
         `Video: ${video.title || "Untitled"} (${getWeaponLabel(video.weapon)})`,
+        `Athlete Slot: ${getAthleteSlotLabel(athleteSlot)}`,
         `Athlete/Opponent: ${video.athlete || "Unknown"} / ${video.opponent || "Unknown"}`,
         `Tournament: ${video.tournament || "Not set"} | Score: ${video.score || "N/A"} | Result: ${getResultLabel(video.match_result) || "N/A"}`,
       ];
@@ -506,6 +608,7 @@ function AnalyzeContent() {
     (
       video: HistoryItem,
       poseData: PoseData | null,
+      athleteSlot: AthleteSlot,
       reportText: string,
     ): {
       contextPack: ChatContextPack;
@@ -514,7 +617,7 @@ function AnalyzeContent() {
       contextStatus: ContextStatusMeta;
       suggestedPrompts: string[];
     } => {
-      const allFrames = extractPoseFrames(poseData);
+      const allFrames = extractPoseFrames(poseData, athleteSlot);
       const originalFrameCount = allFrames.length;
       let sampledFrames = layeredSampleFrames(allFrames, Math.min(TARGET_CONTEXT_FRAMES, Math.max(0, originalFrameCount)));
 
@@ -529,6 +632,7 @@ function AnalyzeContent() {
 
       let contextPack: ChatContextPack = {
         video_id: video.video_id,
+        athlete_slot: athleteSlot,
         mode: "full_pose",
         metadata: {
           title: video.title || "Untitled",
@@ -572,10 +676,11 @@ function AnalyzeContent() {
       } while (guard < 8);
 
       contextPack = { ...contextPack, pose_frames: sampledFrames, report_excerpt: reportExcerpt, overflow };
-      const contextSummary = buildContextSummary(video, reportExcerpt, overflow);
+      const contextSummary = buildContextSummary(video, athleteSlot, reportExcerpt, overflow);
       const contextStatus: ContextStatusMeta = {
         video_id: video.video_id,
         video_title: video.title || "Untitled",
+        athlete_slot: athleteSlot,
         mode: "full_pose",
         overflow,
         updated_at: new Date().toISOString(),
@@ -632,6 +737,7 @@ function AnalyzeContent() {
   const persistVideoSession = useCallback(
     (
       videoId: string,
+      sessionId: string | null,
       nextMessages: Message[],
       contextSummary: string,
       contextStatus: ContextStatusMeta | null,
@@ -643,6 +749,7 @@ function AnalyzeContent() {
       const sanitizedMessages = nextMessages.slice(-MAX_SESSION_MESSAGES);
       const session: VideoQASession = {
         video_id: videoId,
+        session_id: sessionId,
         messages: sanitizedMessages,
         context_summary: contextSummary,
         context_status: contextStatus,
@@ -669,6 +776,417 @@ function AnalyzeContent() {
     }
   }, []);
 
+  const resolveBackendChatSession = useCallback(
+    async (options?: {
+      videoId?: string | null;
+      sessionType?: SessionType;
+      forceNew?: boolean;
+      title?: string;
+      contextSummary?: string;
+    }): Promise<ChatSessionRecord | null> => {
+      const videoId = options?.videoId?.trim() || null;
+      const sessionType = options?.sessionType || (videoId ? SESSION_TYPE_VIDEO : SESSION_TYPE_CHAT);
+
+      if (!options?.forceNew) {
+        const query = new URLSearchParams({ limit: "1", session_type: sessionType });
+        if (videoId) {
+          query.set("video_id", videoId);
+        }
+        const listResponse = await authFetch(`/chat/sessions?${query.toString()}`);
+        if (listResponse.ok) {
+          const listData = (await listResponse.json()) as { sessions?: ChatSessionRecord[] };
+          const existing = listData.sessions?.[0];
+          if (existing) {
+            return existing;
+          }
+        }
+      }
+
+      const createResponse = await authFetch("/chat/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          video_id: videoId,
+          session_type: sessionType,
+          title: options?.title || null,
+          context_summary: options?.contextSummary || null,
+          force_new: Boolean(options?.forceNew),
+        }),
+      });
+      if (!createResponse.ok) {
+        return null;
+      }
+      return (await createResponse.json()) as ChatSessionRecord;
+    },
+    [],
+  );
+
+  const listBackendChatSessions = useCallback(
+    async (options?: {
+      sessionType?: SessionType;
+      limit?: number;
+    }): Promise<ChatSessionRecord[]> => {
+      const query = new URLSearchParams({
+        limit: String(options?.limit ?? 20),
+      });
+      if (options?.sessionType) {
+        query.set("session_type", options.sessionType);
+      }
+      const response = await authFetch(`/chat/sessions?${query.toString()}`);
+      if (!response.ok) {
+        return [];
+      }
+      const data = (await response.json()) as { sessions?: ChatSessionRecord[] };
+      return data.sessions || [];
+    },
+    [],
+  );
+
+  const fetchChatSessions = useCallback(
+    async (options?: { silent?: boolean }) => {
+      try {
+        if (!options?.silent) {
+          setChatSessionsLoading(true);
+        }
+        const sessions = await listBackendChatSessions({ limit: 100 });
+        setChatSessions(sessions);
+        setChatSessionsError(null);
+      } catch (err) {
+        setChatSessionsError(err instanceof Error ? err.message : "Failed to load sessions");
+      } finally {
+        if (!options?.silent) {
+          setChatSessionsLoading(false);
+        }
+      }
+    },
+    [listBackendChatSessions],
+  );
+
+  const syncAnalyzeSessionUrl = useCallback(
+    (sessionId: string | null) => {
+      if (typeof window === "undefined") return;
+
+      const params = new URLSearchParams(window.location.search);
+      if (sessionId) {
+        params.set("chat_session", sessionId);
+      } else {
+        params.delete("chat_session");
+      }
+      params.delete("video");
+      params.delete("training_context");
+
+      const nextQuery = params.toString();
+      const currentQuery = window.location.search.startsWith("?")
+        ? window.location.search.slice(1)
+        : window.location.search;
+
+      if (nextQuery === currentQuery) return;
+      router.replace(nextQuery ? `/analyze?${nextQuery}` : "/analyze", { scroll: false });
+    },
+    [router],
+  );
+
+  const loadBackendChatSessionDetail = useCallback(async (sessionId: string): Promise<ChatSessionDetailRecord | null> => {
+    if (!sessionId) return null;
+
+    const response = await authFetch(`/chat/sessions/${sessionId}?limit=${MAX_BACKEND_SESSION_MESSAGES}`);
+    if (!response.ok) {
+      return null;
+    }
+    return (await response.json()) as ChatSessionDetailRecord;
+  }, []);
+
+  const activateChatSessionById = useCallback(
+    async (sessionId: string, options?: { switchToChat?: boolean }) => {
+      if (!sessionId) return;
+      const switchId = chatSessionSwitchRef.current + 1;
+      const transitionId = beginContextTransition();
+      chatSessionSwitchRef.current = switchId;
+      pendingUrlSessionIdRef.current = sessionId;
+      syncAnalyzeSessionUrl(sessionId);
+      setSessionHydrated(false);
+      setIsDraftChatSession(false);
+      setExternalContextPayload(null);
+      setExternalContextSummary("");
+      setExternalContextStatus(null);
+      setNeedsExternalContextForNextSend(false);
+
+      try {
+        const detail = await loadBackendChatSessionDetail(sessionId);
+        if (switchId !== chatSessionSwitchRef.current || transitionId !== contextTransitionRef.current) return;
+        if (!detail) {
+          throw new Error("Failed to load chat session");
+        }
+
+        const restoredMessages: Message[] = detail.messages?.length
+          ? detail.messages
+              .filter((item) => item.role === "user" || item.role === "assistant")
+              .map((item) => ({ role: item.role, content: item.content }))
+          : [{ role: "assistant", content: DEFAULT_CHAT_OPENING }];
+
+        setMessages(restoredMessages);
+        setActiveChatSessionId(detail.id);
+        setActiveChatVideoId(detail.video_id || null);
+
+        if (detail.video_id) {
+          const videoResponse = await authFetch(`/video/${detail.video_id}`);
+          if (switchId !== chatSessionSwitchRef.current || transitionId !== contextTransitionRef.current) return;
+          if (!videoResponse.ok) {
+            throw new Error("Failed to fetch linked video context");
+          }
+          const video = (await videoResponse.json()) as HistoryItem;
+          let pose: PoseData | null = null;
+          let report: AnalysisReportRecord | null = null;
+
+          try {
+            const poseResponse = await authFetch(`/video/${detail.video_id}/pose-data`);
+            if (switchId !== chatSessionSwitchRef.current || transitionId !== contextTransitionRef.current) return;
+            if (poseResponse.ok) {
+              pose = (await poseResponse.json()) as PoseData;
+            }
+          } catch {
+            pose = null;
+          }
+
+          try {
+            if (pose) {
+              report = await ensureAnalysisReport<AnalysisReportRecord>(detail.video_id, {
+                athleteSlot: getDefaultAthleteSlot(pose),
+                generateIfMissing: false,
+              });
+              if (switchId !== chatSessionSwitchRef.current || transitionId !== contextTransitionRef.current) return;
+            }
+          } catch {
+            report = null;
+          }
+
+          const contextData = { video, pose, report };
+          const reportText = buildReportContextText(contextData.report);
+          const contextAthleteSlot = contextData.report?.athlete_slot ?? getDefaultAthleteSlot(contextData.pose);
+
+          historyDetailRequestRef.current += 1;
+          setSelectedHistoryVideoId(detail.video_id);
+          setHistoryDetail(contextData.video);
+          setHistoryPoseData(contextData.pose);
+          setSelectedHistoryAthleteSlot(contextAthleteSlot);
+          setHistoryReport(contextData.report);
+          setHistoryDetailLoading(false);
+          setHistoryReportLoading(false);
+          setHistoryReportAction(null);
+          setHistoryDetailError(null);
+          setHistoryReportError(null);
+
+          const artifacts = buildContextArtifacts(
+            contextData.video,
+            contextData.pose,
+            contextAthleteSlot,
+            reportText,
+          );
+
+          setChatContextSummary(artifacts.contextSummary);
+          setChatContextStatus(artifacts.contextStatus);
+          setChatSuggestedPrompts(artifacts.suggestedPrompts);
+          setNeedsFullContextForNextSend(true);
+          setChatContextPack(null);
+          persistVideoSession(
+            detail.video_id,
+            detail.id,
+            restoredMessages,
+            artifacts.contextSummary,
+            artifacts.contextStatus,
+            artifacts.suggestedPrompts,
+            true,
+          );
+        } else {
+          setChatContextSummary(detail.context_summary || "");
+          setChatContextStatus(null);
+          setChatSuggestedPrompts(DEFAULT_QUICK_PROMPTS);
+          setNeedsFullContextForNextSend(false);
+          setChatContextPack(null);
+          setSelectedHistoryVideoId(null);
+          setHistoryDetail(null);
+          setHistoryPoseData(null);
+          setHistoryReport(null);
+          setHistoryDetailLoading(false);
+          setHistoryReportLoading(false);
+          setHistoryReportAction(null);
+          setHistoryDetailError(null);
+          setHistoryReportError(null);
+        }
+
+        setSessionHydrated(true);
+        pendingUrlSessionIdRef.current = null;
+        syncAnalyzeSessionUrl(detail.id);
+        void fetchChatSessions({ silent: true });
+        if (options?.switchToChat) {
+          setActiveTab("chat");
+        }
+      } catch {
+        if (switchId !== chatSessionSwitchRef.current || transitionId !== contextTransitionRef.current) return;
+        let fallbackDetail: ChatSessionDetailRecord | null = null;
+        try {
+          const fallbackSessions = await listBackendChatSessions({ limit: 20 });
+          const fallbackSession =
+            fallbackSessions.find((session) => !session.video_id && session.session_type !== SESSION_TYPE_VIDEO) ||
+            fallbackSessions.find((session) => !session.video_id) ||
+            fallbackSessions[0];
+          if (fallbackSession?.id) {
+            fallbackDetail = await loadBackendChatSessionDetail(fallbackSession.id);
+          }
+        } catch {
+          fallbackDetail = null;
+        }
+
+        if (fallbackDetail) {
+          const fallbackMessages: Message[] = fallbackDetail.messages?.length
+            ? fallbackDetail.messages
+                .filter((item) => item.role === "user" || item.role === "assistant")
+                .map((item) => ({ role: item.role, content: item.content }))
+            : [{ role: "assistant", content: DEFAULT_CHAT_OPENING }];
+
+          setMessages([
+            {
+              role: "assistant",
+              content: "Requested session is unavailable. Switched to your latest available thread.",
+            },
+            ...fallbackMessages,
+          ]);
+          setActiveChatSessionId(fallbackDetail.id);
+          setActiveChatVideoId(fallbackDetail.video_id || null);
+          setChatContextPack(null);
+          setChatContextSummary(fallbackDetail.context_summary || "");
+          setChatContextStatus(null);
+          setChatSuggestedPrompts(DEFAULT_QUICK_PROMPTS);
+          setNeedsFullContextForNextSend(false);
+          setIsDraftChatSession(false);
+          setSessionHydrated(true);
+          pendingUrlSessionIdRef.current = null;
+          syncAnalyzeSessionUrl(fallbackDetail.id);
+          void fetchChatSessions({ silent: true });
+          if (options?.switchToChat) {
+            setActiveTab("chat");
+          }
+          return;
+        }
+
+        setMessages([
+          {
+            role: "assistant",
+            content:
+              "Requested session is unavailable. Started a default chat thread.\n\n" +
+              DEFAULT_CHAT_OPENING,
+          },
+        ]);
+        setActiveChatVideoId(null);
+        setActiveChatSessionId(null);
+        setChatContextPack(null);
+        setChatContextSummary("");
+        setChatContextStatus(null);
+        setChatSuggestedPrompts(DEFAULT_QUICK_PROMPTS);
+        setNeedsFullContextForNextSend(false);
+        setIsDraftChatSession(true);
+        setSessionHydrated(true);
+        pendingUrlSessionIdRef.current = null;
+        syncAnalyzeSessionUrl(null);
+        void fetchChatSessions({ silent: true });
+      } finally {
+        if (pendingUrlSessionIdRef.current === sessionId) {
+          pendingUrlSessionIdRef.current = null;
+        }
+        if (switchId === chatSessionSwitchRef.current && transitionId === contextTransitionRef.current) {
+          setIsContextPreparing(false);
+        }
+      }
+    },
+    [
+      beginContextTransition,
+      buildContextArtifacts,
+      fetchChatSessions,
+      listBackendChatSessions,
+      loadBackendChatSessionDetail,
+      persistVideoSession,
+      syncAnalyzeSessionUrl,
+    ],
+  );
+
+  const activateGeneralChatSession = useCallback(
+    async (options?: {
+      forceNew?: boolean;
+      switchToChat?: boolean;
+      sessionType?: SessionType;
+      title?: string;
+      contextSummary?: string;
+    }) => {
+      let requestedSessionId: string | null = null;
+      const transitionId = beginContextTransition();
+      setActiveChatVideoId(null);
+      setSelectedHistoryVideoId(null);
+      setHistoryDetail(null);
+      setHistoryPoseData(null);
+      setHistoryReport(null);
+      setHistoryDetailError(null);
+      setHistoryReportError(null);
+      setExternalContextPayload(null);
+      setExternalContextSummary("");
+      setExternalContextStatus(null);
+      setNeedsExternalContextForNextSend(false);
+      setSessionHydrated(false);
+      setIsDraftChatSession(false);
+
+      try {
+        const resolved = await resolveBackendChatSession({
+          sessionType: options?.sessionType || SESSION_TYPE_CHAT,
+          forceNew: Boolean(options?.forceNew),
+          title: options?.title || "Assistant Chat",
+          contextSummary: options?.contextSummary || "",
+        });
+        if (transitionId !== contextTransitionRef.current) return;
+        requestedSessionId = resolved?.id || null;
+        pendingUrlSessionIdRef.current = requestedSessionId;
+        syncAnalyzeSessionUrl(requestedSessionId);
+        const detail = requestedSessionId ? await loadBackendChatSessionDetail(requestedSessionId) : null;
+        if (transitionId !== contextTransitionRef.current) return;
+        const nextMessages: Message[] =
+          detail?.messages?.length
+            ? detail.messages
+                .filter((item) => item.role === "user" || item.role === "assistant")
+                .map((item) => ({ role: item.role, content: item.content }))
+            : [{ role: "assistant", content: DEFAULT_CHAT_OPENING }];
+
+        setMessages(nextMessages);
+        setActiveChatSessionId(requestedSessionId);
+        setChatContextPack(null);
+        setChatContextStatus(null);
+        setChatContextSummary(detail?.context_summary || options?.contextSummary || "");
+        setChatSuggestedPrompts(DEFAULT_QUICK_PROMPTS);
+        setNeedsFullContextForNextSend(false);
+        setIsDraftChatSession(false);
+        setSessionHydrated(true);
+        pendingUrlSessionIdRef.current = null;
+        syncAnalyzeSessionUrl(requestedSessionId);
+        void fetchChatSessions({ silent: true });
+
+        if (options?.switchToChat) {
+          setActiveTab("chat");
+        }
+      } finally {
+        if (pendingUrlSessionIdRef.current === requestedSessionId) {
+          pendingUrlSessionIdRef.current = null;
+        }
+        if (transitionId === contextTransitionRef.current) {
+          setIsContextPreparing(false);
+        }
+      }
+    },
+    [
+      beginContextTransition,
+      fetchChatSessions,
+      loadBackendChatSessionDetail,
+      resolveBackendChatSession,
+      syncAnalyzeSessionUrl,
+    ],
+  );
+
   const fetchHistoryVideos = useCallback(async () => {
     try {
       setHistoryLoading(true);
@@ -678,16 +1196,18 @@ function AnalyzeContent() {
       }
       const data = await response.json();
       setHistoryVideos(data.videos || []);
-      setHistoryError(null);
-    } catch (err) {
-      setHistoryError(err instanceof Error ? err.message : "Failed to load history");
+    } catch {
+      // Keep previous video list on transient failures.
     } finally {
       setHistoryLoading(false);
     }
   }, []);
 
   const fetchVideoContextData = useCallback(
-    async (videoId: string): Promise<{ video: HistoryItem; pose: PoseData | null; report: AnalysisReportRecord | null }> => {
+    async (
+      videoId: string,
+      athleteSlot?: AthleteSlot,
+    ): Promise<{ video: HistoryItem; pose: PoseData | null; report: AnalysisReportRecord | null }> => {
       const videoResponse = await authFetch(`/video/${videoId}`);
       if (!videoResponse.ok) {
         throw new Error("Failed to fetch video details");
@@ -707,9 +1227,12 @@ function AnalyzeContent() {
       }
 
       try {
-        const reportResponse = await authFetch(`/video/${videoId}/analysis-report`);
-        if (reportResponse.ok) {
-          report = (await reportResponse.json()) as AnalysisReportRecord;
+        if (pose) {
+          const resolvedSlot = athleteSlot ?? getDefaultAthleteSlot(pose);
+          report = await ensureAnalysisReport<AnalysisReportRecord>(videoId, {
+            athleteSlot: resolvedSlot,
+            generateIfMissing: false,
+          });
         }
       } catch {
         report = null;
@@ -721,30 +1244,133 @@ function AnalyzeContent() {
   );
 
   const loadHistoryDetail = useCallback(
-    async (videoId: string): Promise<{ video: HistoryItem; pose: PoseData | null; report: AnalysisReportRecord | null } | null> => {
+    async (
+      videoId: string,
+      athleteSlot?: AthleteSlot,
+    ): Promise<{ video: HistoryItem; pose: PoseData | null; report: AnalysisReportRecord | null } | null> => {
+      const requestId = historyDetailRequestRef.current + 1;
+      historyDetailRequestRef.current = requestId;
       try {
         setHistoryDetailLoading(true);
         setHistoryDetailError(null);
         setHistoryReportError(null);
-        setHistoryReport(null);
+        setHistoryReport(readCachedAnalysisReport<AnalysisReportRecord>(videoId, athleteSlot));
 
-        const contextData = await fetchVideoContextData(videoId);
+        const contextData = await fetchVideoContextData(videoId, athleteSlot);
+        if (requestId !== historyDetailRequestRef.current) {
+          return null;
+        }
+        const resolvedSlot = athleteSlot ?? getDefaultAthleteSlot(contextData.pose);
         setHistoryDetail(contextData.video);
         setHistoryPoseData(contextData.pose);
+        setSelectedHistoryAthleteSlot(resolvedSlot);
         setHistoryReport(contextData.report);
         return contextData;
       } catch (err) {
+        if (requestId !== historyDetailRequestRef.current) {
+          return null;
+        }
         setHistoryDetailError(err instanceof Error ? err.message : "Failed to load history detail");
         setHistoryDetail(null);
         setHistoryPoseData(null);
+        setSelectedHistoryAthleteSlot("left");
         setHistoryReport(null);
         return null;
       } finally {
-        setHistoryDetailLoading(false);
+        if (requestId === historyDetailRequestRef.current) {
+          setHistoryDetailLoading(false);
+        }
       }
     },
     [fetchVideoContextData],
   );
+
+  useEffect(() => {
+    if (!selectedHistoryVideoId || !historyPoseData) {
+      return;
+    }
+
+    const fallbackSlot = getDefaultAthleteSlot(historyPoseData);
+    if (historyAthleteSlots.length && !historyAthleteSlots.includes(selectedHistoryAthleteSlot)) {
+      setSelectedHistoryAthleteSlot(fallbackSlot);
+      return;
+    }
+
+    if (
+      historyReport &&
+      historyReport.video_id === selectedHistoryVideoId &&
+      (historyReport.athlete_slot ?? fallbackSlot) === selectedHistoryAthleteSlot
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const syncSlotReport = async () => {
+      const cachedReport = readCachedAnalysisReport<AnalysisReportRecord>(
+        selectedHistoryVideoId,
+        selectedHistoryAthleteSlot,
+      );
+      const cachedSlot = cachedReport ? (cachedReport.athlete_slot ?? fallbackSlot) : null;
+      if (cachedReport && cachedSlot === selectedHistoryAthleteSlot) {
+        setHistoryReport(cachedReport);
+        setHistoryReportLoading(false);
+        setHistoryReportAction(null);
+        setHistoryReportError(null);
+        return;
+      }
+
+      setHistoryReport(cachedReport);
+      setHistoryReportLoading(true);
+      setHistoryReportAction("load");
+      setHistoryReportError(null);
+      try {
+        const report = await ensureAnalysisReport<AnalysisReportRecord>(selectedHistoryVideoId, {
+          athleteSlot: selectedHistoryAthleteSlot,
+          generateIfMissing: false,
+        });
+        if (!cancelled) {
+          setHistoryReport(report ?? cachedReport ?? null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setHistoryReport(cachedReport ?? null);
+          setHistoryReportError(err instanceof Error ? err.message : "Failed to load report");
+        }
+      } finally {
+        if (!cancelled) {
+          setHistoryReportLoading(false);
+          setHistoryReportAction(null);
+        }
+      }
+    };
+
+    void syncSlotReport();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    historyAthleteSlots,
+    historyPoseData,
+    historyReport,
+    selectedHistoryAthleteSlot,
+    selectedHistoryVideoId,
+  ]);
+
+  useEffect(() => {
+    if (
+      !activeChatVideoId ||
+      !selectedHistoryVideoId ||
+      activeChatVideoId !== selectedHistoryVideoId ||
+      !historyPoseData
+    ) {
+      return;
+    }
+
+    setNeedsFullContextForNextSend(true);
+    setChatContextPack(null);
+  }, [activeChatVideoId, historyPoseData, selectedHistoryAthleteSlot, selectedHistoryVideoId]);
 
   const buildHandoffMessage = useCallback(
     (
@@ -782,148 +1408,146 @@ function AnalyzeContent() {
         forceNewSession?: boolean;
         switchToChat?: boolean;
         reportText?: string;
+        completionNotice?: string;
         preloaded?: { video: HistoryItem; pose: PoseData | null; report: AnalysisReportRecord | null } | null;
       },
     ) => {
       if (!videoId) return;
+      let requestedSessionId: string | null = null;
 
       const switchId = sessionSwitchRef.current + 1;
+      const transitionId = beginContextTransition();
       sessionSwitchRef.current = switchId;
-      setIsContextPreparing(true);
       setActiveChatVideoId(videoId);
+      setActiveChatSessionId(null);
       setSessionHydrated(false);
+      setIsDraftChatSession(false);
       setExternalContextPayload(null);
       setExternalContextSummary("");
       setExternalContextStatus(null);
       setNeedsExternalContextForNextSend(false);
 
-      if (!options?.forceNewSession) {
-        const existingSession = readVideoSession(videoId);
-        if (existingSession) {
-          if (switchId !== sessionSwitchRef.current) return;
-
-          const hydratedMessages: Message[] = existingSession.messages?.length
-            ? existingSession.messages
-            : [{ role: "assistant", content: DEFAULT_CHAT_OPENING }];
-          const preloadedReportText = options?.reportText ?? buildReportContextText(options?.preloaded?.report ?? null);
-          let nextContextSummary = existingSession.context_summary || "";
-          let nextContextStatus = existingSession.context_status || null;
-          let nextSuggestedPrompts =
-            existingSession.suggested_prompts?.length ? existingSession.suggested_prompts : DEFAULT_QUICK_PROMPTS;
-          let nextNeedsFullContext = Boolean(existingSession.needs_full_context);
-
-          if (options?.preloaded) {
-            const refreshedArtifacts = buildContextArtifacts(
-              options.preloaded.video,
-              options.preloaded.pose,
-              preloadedReportText,
-            );
-            nextContextSummary = refreshedArtifacts.contextSummary;
-            nextContextStatus = refreshedArtifacts.contextStatus;
-            nextSuggestedPrompts = refreshedArtifacts.suggestedPrompts;
-            nextNeedsFullContext = true;
-            persistVideoSession(
-              videoId,
-              hydratedMessages,
-              refreshedArtifacts.contextSummary,
-              refreshedArtifacts.contextStatus,
-              refreshedArtifacts.suggestedPrompts,
-              true,
-            );
-          }
-
-          setMessages(hydratedMessages);
-          setChatContextSummary(nextContextSummary);
-          setChatContextStatus(nextContextStatus);
-          setChatSuggestedPrompts(nextSuggestedPrompts);
-          setNeedsFullContextForNextSend(nextNeedsFullContext);
-          setChatContextPack(null);
-          setSessionHydrated(true);
-
-          if (options?.switchToChat) {
-            setActiveTab("chat");
-          }
-
-          setIsContextPreparing(false);
-          return;
-        }
-      }
-
       try {
         const contextData = options?.preloaded ?? (await fetchVideoContextData(videoId));
-        if (!contextData || switchId !== sessionSwitchRef.current) return;
+        if (!contextData || switchId !== sessionSwitchRef.current || transitionId !== contextTransitionRef.current) return;
         const reportText = options?.reportText ?? buildReportContextText(contextData.report);
+        const localSession = !options?.forceNewSession ? readVideoSession(videoId) : null;
+        const contextAthleteSlot = contextData.report?.athlete_slot ?? getDefaultAthleteSlot(contextData.pose);
 
         const artifacts = buildContextArtifacts(
           contextData.video,
           contextData.pose,
+          contextAthleteSlot,
           reportText,
         );
 
-        const handoffMessage = buildHandoffMessage(
-          contextData.video,
-          reportText,
-          artifacts.contextStatus.overflow,
-          artifacts.suggestedPrompts,
-        );
+        const backendSession = await resolveBackendChatSession({
+          videoId,
+          sessionType: SESSION_TYPE_VIDEO,
+          forceNew: Boolean(options?.forceNewSession),
+          title: contextData.video.title || "Video coaching",
+          contextSummary: artifacts.contextSummary,
+        });
+        if (switchId !== sessionSwitchRef.current || transitionId !== contextTransitionRef.current) return;
 
-        const handoffMessages: Message[] = [{ role: "assistant", content: handoffMessage }];
+        const backendSessionId = backendSession?.id || localSession?.session_id || null;
+        requestedSessionId = backendSessionId;
+        pendingUrlSessionIdRef.current = requestedSessionId;
+        syncAnalyzeSessionUrl(requestedSessionId);
+        setActiveChatSessionId(backendSessionId);
 
-        setMessages(handoffMessages);
+        let restoredMessages: Message[] | null = null;
+        if (backendSessionId) {
+          const detail = await loadBackendChatSessionDetail(backendSessionId);
+          if (switchId !== sessionSwitchRef.current || transitionId !== contextTransitionRef.current) return;
+          if (detail?.messages?.length) {
+            restoredMessages = detail.messages
+              .filter((item) => item.role === "user" || item.role === "assistant")
+              .map((item) => ({ role: item.role, content: item.content }));
+          }
+        }
+
+        let nextMessages: Message[] = restoredMessages || [];
+        let nextNeedsFullContext = false;
+
+        if (!nextMessages.length && localSession?.messages?.length) {
+          nextMessages = localSession.messages;
+          nextNeedsFullContext = Boolean(localSession.needs_full_context);
+        }
+
+        if (!nextMessages.length) {
+          const handoffMessage = buildHandoffMessage(
+            contextData.video,
+            reportText,
+            artifacts.contextStatus.overflow,
+            artifacts.suggestedPrompts,
+          );
+          nextMessages = [{ role: "assistant", content: handoffMessage }];
+          nextNeedsFullContext = true;
+        }
+
+        if (options?.completionNotice) {
+          const noticeMessage = options.completionNotice.trim();
+          if (noticeMessage) {
+            nextMessages = [
+              ...nextMessages,
+              { role: "assistant", content: noticeMessage },
+            ];
+          }
+        }
+
+        setMessages(nextMessages);
         setChatContextSummary(artifacts.contextSummary);
         setChatContextStatus(artifacts.contextStatus);
         setChatSuggestedPrompts(artifacts.suggestedPrompts);
-        setNeedsFullContextForNextSend(true);
-        setChatContextPack(artifacts.contextPack);
+        setNeedsFullContextForNextSend(nextNeedsFullContext);
+        setChatContextPack(nextNeedsFullContext ? artifacts.contextPack : null);
+        setIsDraftChatSession(false);
         setSessionHydrated(true);
+        pendingUrlSessionIdRef.current = null;
+        syncAnalyzeSessionUrl(backendSessionId);
+        void fetchChatSessions({ silent: true });
         persistVideoSession(
           videoId,
-          handoffMessages,
+          backendSessionId,
+          nextMessages,
           artifacts.contextSummary,
           artifacts.contextStatus,
           artifacts.suggestedPrompts,
-          true,
+          nextNeedsFullContext,
         );
 
         if (options?.switchToChat) {
           setActiveTab("chat");
         }
       } finally {
-        if (switchId === sessionSwitchRef.current) {
+        if (pendingUrlSessionIdRef.current === requestedSessionId) {
+          pendingUrlSessionIdRef.current = null;
+        }
+        if (switchId === sessionSwitchRef.current && transitionId === contextTransitionRef.current) {
           setIsContextPreparing(false);
         }
       }
     },
-    [buildContextArtifacts, buildHandoffMessage, fetchVideoContextData, persistVideoSession, readVideoSession],
+    [
+      beginContextTransition,
+      buildContextArtifacts,
+      buildHandoffMessage,
+      fetchChatSessions,
+      fetchVideoContextData,
+      loadBackendChatSessionDetail,
+      persistVideoSession,
+      readVideoSession,
+      resolveBackendChatSession,
+      syncAnalyzeSessionUrl,
+    ],
   );
-
-  const handleClearChatContext = useCallback(() => {
-    setActiveChatVideoId(null);
-    setChatContextPack(null);
-    setChatContextSummary("");
-    setChatContextStatus(null);
-    setExternalContextPayload(null);
-    setExternalContextSummary("");
-    setExternalContextStatus(null);
-    setNeedsExternalContextForNextSend(false);
-    setChatSuggestedPrompts(DEFAULT_QUICK_PROMPTS);
-    setNeedsFullContextForNextSend(false);
-    setPendingAutoQuestion(null);
-    setMessages([{ role: "assistant", content: DEFAULT_CHAT_OPENING }]);
-    setSessionHydrated(false);
-  }, []);
-
-  const handleSwitchVideoFromChat = useCallback(() => {
-    setActiveTab("history");
-    if (typeof window !== "undefined" && window.innerWidth < 768) {
-      setIsMobileSidebarOpen(true);
-    }
-  }, []);
 
   useEffect(() => {
     if (!sessionHydrated || !activeChatVideoId) return;
     persistVideoSession(
       activeChatVideoId,
+      activeChatSessionId,
       messages,
       chatContextSummary,
       chatContextStatus,
@@ -932,6 +1556,7 @@ function AnalyzeContent() {
     );
   }, [
     activeChatVideoId,
+    activeChatSessionId,
     chatContextStatus,
     chatContextSummary,
     chatSuggestedPrompts,
@@ -944,6 +1569,10 @@ function AnalyzeContent() {
   useEffect(() => {
     fetchHistoryVideos();
   }, [fetchHistoryVideos]);
+
+  useEffect(() => {
+    void fetchChatSessions();
+  }, [fetchChatSessions]);
 
   useEffect(() => {
     setSidebarHydrated(true);
@@ -987,6 +1616,16 @@ function AnalyzeContent() {
       ]);
       setActiveTab("chat");
       setActiveChatVideoId(null);
+      setActiveChatSessionId(null);
+      setSelectedHistoryVideoId(null);
+      setHistoryDetail(null);
+      setHistoryPoseData(null);
+      setHistoryReport(null);
+      setHistoryDetailLoading(false);
+      setHistoryReportLoading(false);
+      setHistoryReportAction(null);
+      setHistoryDetailError(null);
+      setHistoryReportError(null);
       setChatContextPack(null);
       setChatContextSummary(handoff.summary || "");
       setChatContextStatus(null);
@@ -998,25 +1637,42 @@ function AnalyzeContent() {
         handoff.suggested_prompts?.length ? handoff.suggested_prompts : DEFAULT_QUICK_PROMPTS,
       );
       setNeedsFullContextForNextSend(false);
+      setIsDraftChatSession(false);
       setSessionHydrated(false);
       const autoQuestion =
         handoff.auto_question?.trim() ||
         handoff.suggested_prompts?.[0]?.trim() ||
         "评估我最近疲劳和下周负荷安排。";
-      setPendingAutoQuestion(autoQuestion);
+      void (async () => {
+        const trainingSession = await resolveBackendChatSession({
+          sessionType: SESSION_TYPE_TRAINING,
+          forceNew: true,
+          title: `Training Analysis ${new Date().toLocaleDateString()}`,
+          contextSummary: handoff.summary || "",
+        });
+        if (trainingSession?.id) {
+          setActiveChatSessionId(trainingSession.id);
+          syncAnalyzeSessionUrl(trainingSession.id);
+          void fetchChatSessions({ silent: true });
+        }
+        setPendingAutoQuestion(autoQuestion);
+      })();
     } catch {
       // Ignore malformed payload and continue with normal flow.
     } finally {
       window.localStorage.removeItem(TRAINING_HANDOFF_STORAGE_KEY);
       setHasHandledTrainingHandoff(true);
     }
-  }, [hasHandledTrainingHandoff, searchParams]);
+  }, [fetchChatSessions, hasHandledTrainingHandoff, resolveBackendChatSession, searchParams, syncAnalyzeSessionUrl]);
 
   useEffect(() => {
     if (historyLoading || hasHandledSearchParamVideo) return;
 
     const videoId = searchParams.get("video");
     if (videoId) {
+      contextTransitionRef.current += 1;
+      suppressUrlSessionRestoreRef.current = true;
+      hasInitializedDefaultSessionRef.current = true;
       setSelectedHistoryVideoId(videoId);
       setActiveTab("history");
       void (async () => {
@@ -1028,8 +1684,94 @@ function AnalyzeContent() {
     setHasHandledSearchParamVideo(true);
   }, [historyLoading, hasHandledSearchParamVideo, searchParams, loadHistoryDetail, activateVideoChatSession]);
 
-  const handleSelectHistoryVideo = useCallback(
+  useEffect(() => {
+    if (!hasHandledTrainingHandoff) return;
+    if (isContextPreparing) return;
+
+    const hasTrainingContext = searchParams.get("training_context") === "1";
+    const videoId = searchParams.get("video");
+    if (hasTrainingContext || videoId) {
+      return;
+    }
+
+    if (selectedHistoryVideoId) {
+      return;
+    }
+
+    if (suppressUrlSessionRestoreRef.current && !activeChatSessionId) {
+      return;
+    }
+
+    const chatSessionId = searchParams.get("chat_session");
+    if (chatSessionId) {
+      if (suppressUrlSessionRestoreRef.current && !activeChatSessionId) {
+        return;
+      }
+      suppressUrlSessionRestoreRef.current = false;
+      hasInitializedDefaultSessionRef.current = true;
+      if (
+        chatSessionId !== activeChatSessionId &&
+        chatSessionId !== pendingUrlSessionIdRef.current
+      ) {
+        void activateChatSessionById(chatSessionId, { switchToChat: true });
+      }
+      return;
+    }
+
+    suppressUrlSessionRestoreRef.current = false;
+
+    if (activeChatSessionId || hasInitializedDefaultSessionRef.current) {
+      return;
+    }
+
+    hasInitializedDefaultSessionRef.current = true;
+    let cancelled = false;
+    void (async () => {
+      const sessions = await listBackendChatSessions({ limit: 20 });
+      if (cancelled) return;
+      const recentVideo = sessions.find(
+        (session) => Boolean(session.video_id) || normalizeSessionType(session.session_type) === SESSION_TYPE_VIDEO,
+      );
+      if (recentVideo?.id) {
+        if (cancelled) return;
+        await activateChatSessionById(recentVideo.id, { switchToChat: true });
+        return;
+      }
+      const recentNonVideo = sessions.find(
+        (session) => !session.video_id && normalizeSessionType(session.session_type) !== SESSION_TYPE_VIDEO,
+      );
+      if (recentNonVideo?.id) {
+        if (cancelled) return;
+        await activateChatSessionById(recentNonVideo.id, { switchToChat: true });
+        return;
+      }
+      if (cancelled) return;
+      await activateGeneralChatSession({
+        forceNew: false,
+        switchToChat: true,
+        sessionType: SESSION_TYPE_CHAT,
+        title: "Assistant Chat",
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeChatSessionId,
+    activateChatSessionById,
+    activateGeneralChatSession,
+    hasHandledTrainingHandoff,
+    isContextPreparing,
+    listBackendChatSessions,
+    searchParams,
+    selectedHistoryVideoId,
+  ]);
+
+  const handleOpenVideoDetail = useCallback(
     (videoId: string) => {
+      contextTransitionRef.current += 1;
+      suppressUrlSessionRestoreRef.current = true;
+      hasInitializedDefaultSessionRef.current = true;
       setSelectedHistoryVideoId(videoId);
       setActiveTab("history");
       setIsMobileSidebarOpen(false);
@@ -1041,23 +1783,88 @@ function AnalyzeContent() {
     [activateVideoChatSession, loadHistoryDetail],
   );
 
+  const handleEnterVideoAnalysis = useCallback(() => {
+    // Cancel in-flight context switches/detail loads so stale responses cannot override this intent.
+    chatSessionSwitchRef.current += 1;
+    sessionSwitchRef.current += 1;
+    historyDetailRequestRef.current += 1;
+    contextTransitionRef.current += 1;
+    pendingUrlSessionIdRef.current = null;
+    suppressUrlSessionRestoreRef.current = true;
+    hasInitializedDefaultSessionRef.current = true;
+
+    setActiveTab("analyze");
+    setIsMobileSidebarOpen(false);
+    setInput("");
+    setMessages([{ role: "assistant", content: DEFAULT_CHAT_OPENING }]);
+    setIsTyping(false);
+    setIsContextPreparing(false);
+    setSessionHydrated(true);
+    setIsDraftChatSession(true);
+    setPendingAutoQuestion(null);
+
+    setActiveChatVideoId(null);
+    setActiveChatSessionId(null);
+    setChatContextPack(null);
+    setChatContextSummary("");
+    setChatContextStatus(null);
+    setChatSuggestedPrompts(DEFAULT_QUICK_PROMPTS);
+    setNeedsFullContextForNextSend(false);
+
+    setExternalContextPayload(null);
+    setExternalContextSummary("");
+    setExternalContextStatus(null);
+    setNeedsExternalContextForNextSend(false);
+
+    setSelectedHistoryVideoId(null);
+    setHistoryDetail(null);
+    setHistoryPoseData(null);
+    setHistoryReport(null);
+    setHistoryDetailLoading(false);
+    setHistoryReportLoading(false);
+    setHistoryReportAction(null);
+    setHistoryDetailError(null);
+    setHistoryReportError(null);
+
+    syncAnalyzeSessionUrl(null);
+  }, [syncAnalyzeSessionUrl]);
+
+  const handleSelectChatSession = useCallback(
+    (sessionId: string) => {
+      if (!sessionId) return;
+      setIsMobileSidebarOpen(false);
+      setActiveTab("chat");
+      setIsDraftChatSession(false);
+      suppressUrlSessionRestoreRef.current = false;
+      void activateChatSessionById(sessionId, { switchToChat: true });
+    },
+    [activateChatSessionById],
+  );
+
   const handleGenerateHistoryReport = useCallback(async () => {
     if (!selectedHistoryVideoId) return;
 
     try {
       setHistoryReportLoading(true);
+      setHistoryReportAction("generate");
       setHistoryReportError(null);
 
-      const regenerateQuery = historyReport ? "?force_regenerate=true" : "";
-      const response = await authFetch(`/video/${selectedHistoryVideoId}/analyze/pose/report${regenerateQuery}`, {
-        method: "POST",
+      const job = await startAnalysisReportJob(selectedHistoryVideoId, {
+        athleteSlot: selectedHistoryAthleteSlot,
+        forceRegenerate: Boolean(historyReport),
       });
-
-      if (!response.ok) {
+      const jobStatus = await waitForAnalysisReportJob<AnalysisReportRecord>(
+        selectedHistoryVideoId,
+        job.job_id,
+        { pollIntervalMs: 1500, timeoutMs: 240000 },
+      );
+      const data =
+        jobStatus.results.find(
+          (item) => (item.athlete_slot ?? selectedHistoryAthleteSlot) === selectedHistoryAthleteSlot,
+        ) ?? jobStatus.results[0];
+      if (!data) {
         throw new Error("Failed to generate report");
       }
-
-      const data = (await response.json()) as AnalysisReportRecord;
       setHistoryReport(data);
       if (selectedHistoryVideoId && selectedHistoryVideoId === activeChatVideoId) {
         setNeedsFullContextForNextSend(true);
@@ -1067,8 +1874,9 @@ function AnalyzeContent() {
       setHistoryReportError(err instanceof Error ? err.message : "Failed to generate report");
     } finally {
       setHistoryReportLoading(false);
+      setHistoryReportAction(null);
     }
-  }, [activeChatVideoId, historyReport, selectedHistoryVideoId]);
+  }, [activeChatVideoId, historyReport, selectedHistoryAthleteSlot, selectedHistoryVideoId]);
 
   const handleAskAiAboutHistory = useCallback(() => {
     if (!historyDetail) return;
@@ -1151,11 +1959,16 @@ function AnalyzeContent() {
       };
     }
 
-    const contextData = await fetchVideoContextData(activeChatVideoId);
+    const contextData = await fetchVideoContextData(
+      activeChatVideoId,
+      activeChatVideoId === selectedHistoryVideoId ? selectedHistoryAthleteSlot : undefined,
+    );
     const reportText = buildReportContextText(contextData.report);
+    const contextAthleteSlot = contextData.report?.athlete_slot ?? getDefaultAthleteSlot(contextData.pose);
     const artifacts = buildContextArtifacts(
       contextData.video,
       contextData.pose,
+      contextAthleteSlot,
       reportText,
     );
 
@@ -1176,6 +1989,8 @@ function AnalyzeContent() {
     chatContextStatus,
     chatContextSummary,
     fetchVideoContextData,
+    selectedHistoryAthleteSlot,
+    selectedHistoryVideoId,
   ]);
 
   const handleUpload = async () => {
@@ -1212,43 +2027,78 @@ function AnalyzeContent() {
       let reportMessage = "";
 
       if (analysisMode === "pose") {
-        const analyzeResponse = await authFetch("/video/analyze/pose", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            video_id: uploadData.video_id,
-          }),
-        });
+        const poseJob = await startPoseAnalysisJob(uploadData.video_id);
+        reportMessage =
+          "Video uploaded successfully. Pose analysis started in background, and the report will generate automatically after pose extraction finishes.";
 
-        if (!analyzeResponse.ok) {
-          throw new Error("Pose analysis failed");
-        }
+        void (async () => {
+          try {
+            const poseJobStatus = await waitForPoseAnalysisJob(uploadData.video_id, poseJob.job_id, {
+              pollIntervalMs: 1500,
+              timeoutMs: 900000,
+            });
 
-        const analyzeData: PoseAnalysisResult = await analyzeResponse.json();
-        setPoseResult(analyzeData);
-        setVideoFile((prev) =>
-          prev ? { ...prev, progress: Math.max(prev.progress, 88) } : null,
-        );
+            const analyzeData = poseJobStatus.result as PoseAnalysisResult | null | undefined;
+            if (analyzeData) {
+              setPoseResult(analyzeData);
+            }
+            setVideoFile((prev) =>
+              prev && prev.id === uploadData.video_id
+                ? { ...prev, progress: Math.max(prev.progress, 88) }
+                : prev,
+            );
 
-        reportMessage = `Pose analysis complete! Generated skeleton overlay video and extracted ${analyzeData.total_frames} frames of pose data.`;
+            if (selectedHistoryVideoIdRef.current === uploadData.video_id) {
+              void loadHistoryDetail(uploadData.video_id);
+            }
 
-        try {
-          setVideoFile((prev) =>
-            prev ? { ...prev, progress: Math.max(prev.progress, 92) } : null,
-          );
-          const reportResponse = await authFetch(`/video/${uploadData.video_id}/analyze/pose/report`, {
-            method: "POST",
-          });
+            try {
+              setVideoFile((prev) =>
+                prev && prev.id === uploadData.video_id
+                  ? { ...prev, progress: Math.max(prev.progress, 92) }
+                  : prev,
+              );
+              const reportJob = await startAnalysisReportJob(uploadData.video_id, {
+                forceRegenerate: false,
+              });
+              const jobStatus = await waitForAnalysisReportJob<AnalysisReportRecord>(
+                uploadData.video_id,
+                reportJob.job_id,
+                { pollIntervalMs: 1500, timeoutMs: 300000 },
+              );
 
-          if (reportResponse.ok) {
-            const reportData = await reportResponse.json();
-            if (reportData.report) {
-              reportMessage = reportData.report;
+              if (selectedHistoryVideoIdRef.current === uploadData.video_id) {
+                const preferredSlotReport =
+                  jobStatus.results.find((item) => item.athlete_slot === selectedHistoryAthleteSlot) ??
+                  jobStatus.results[0];
+                if (preferredSlotReport) {
+                  setHistoryReport(preferredSlotReport);
+                }
+              }
+            } catch (reportError) {
+              console.error("Pose report background job failed:", reportError);
+            }
+
+            stopProcessingProgress();
+            setVideoFile((prev) =>
+              prev && prev.id === uploadData.video_id
+                ? { ...prev, status: "complete", progress: 100 }
+                : prev,
+            );
+            void fetchHistoryVideos();
+          } catch (poseError) {
+            console.error("Pose analysis background job failed:", poseError);
+            stopProcessingProgress();
+            setVideoFile((prev) =>
+              prev && prev.id === uploadData.video_id
+                ? { ...prev, status: "error", progress: 0 }
+                : prev,
+            );
+            if (selectedHistoryVideoIdRef.current === uploadData.video_id) {
+              setUploadError("Pose analysis failed in background. Please try again.");
             }
           }
-        } catch (reportError) {
-          console.error("Failed to generate pose report:", reportError);
-        }
+        })();
       } else {
         const analyzeResponse = await authFetch("/video/analyze/cnn", {
           method: "POST",
@@ -1271,8 +2121,10 @@ function AnalyzeContent() {
         }
       }
 
-      stopProcessingProgress();
-      setVideoFile((prev) => (prev ? { ...prev, status: "complete", progress: 100 } : null));
+      if (analysisMode !== "pose") {
+        stopProcessingProgress();
+        setVideoFile((prev) => (prev ? { ...prev, status: "complete", progress: 100 } : null));
+      }
       setSelectedHistoryVideoId(uploadData.video_id);
       setUploadError(null);
       const preloaded = await loadHistoryDetail(uploadData.video_id);
@@ -1280,6 +2132,8 @@ function AnalyzeContent() {
         forceNewSession: true,
         switchToChat: true,
         reportText: reportMessage,
+        completionNotice:
+          "分析已完成。可前往历史详情页面查看分析细节，再回来继续提问。",
         preloaded,
       });
       void fetchHistoryVideos();
@@ -1319,6 +2173,7 @@ function AnalyzeContent() {
       try {
         const recentMessages = nextMessages.slice(-10);
         let contextPayload: string | undefined;
+        let sessionIdForSend = activeChatSessionId;
 
         if (activeChatVideoId) {
           if (needsFullContextForNextSend) {
@@ -1337,26 +2192,61 @@ function AnalyzeContent() {
           contextPayload = externalContextSummary;
         }
 
-        const response = await fetch(buildApiUrl("/chat"), {
+        if (!activeChatVideoId && !sessionIdForSend) {
+          const shouldForceNewSession = needsExternalContextForNextSend || isDraftChatSession;
+          const createdSession = await resolveBackendChatSession({
+            sessionType: needsExternalContextForNextSend ? SESSION_TYPE_TRAINING : SESSION_TYPE_CHAT,
+            forceNew: shouldForceNewSession,
+            title:
+              needsExternalContextForNextSend
+                ? "Training Analysis"
+                : `Chat ${new Date().toLocaleDateString()}`,
+            contextSummary: contextPayload || "",
+          });
+          if (createdSession?.id) {
+            sessionIdForSend = createdSession.id;
+            setActiveChatSessionId(createdSession.id);
+            setIsDraftChatSession(false);
+            syncAnalyzeSessionUrl(createdSession.id);
+            void fetchChatSessions({ silent: true });
+          }
+        }
+
+        const payload = sessionIdForSend
+          ? {
+              session_id: sessionIdForSend,
+              message: userMessage,
+              context: contextPayload,
+            }
+          : {
+              messages: recentMessages.map((m) => ({
+                role: m.role,
+                content: m.content,
+              })),
+              context: contextPayload,
+            };
+
+        const response = await authFetch("/chat", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            messages: recentMessages.map((m) => ({
-              role: m.role,
-              content: m.content,
-            })),
-            context: contextPayload,
-          }),
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
         });
+        if (!response.ok) {
+          throw new Error("Failed to send message");
+        }
 
         const data = await response.json();
         setIsTyping(false);
         const updatedMessages = [...nextMessages, { role: "assistant" as const, content: data.message }];
         setMessages(updatedMessages);
+        if (typeof data.session_id === "string" && data.session_id) {
+          setActiveChatSessionId(data.session_id);
+          setIsDraftChatSession(false);
+          syncAnalyzeSessionUrl(data.session_id);
+        }
         setNeedsFullContextForNextSend(false);
         setNeedsExternalContextForNextSend(false);
+        void fetchChatSessions({ silent: true });
       } catch {
         setIsTyping(false);
         setMessages([
@@ -1369,22 +2259,160 @@ function AnalyzeContent() {
       }
     },
     [
+      activeChatSessionId,
       activeChatVideoId,
       chatContextSummary,
       ensureActiveVideoContext,
       externalContextPayload,
       externalContextSummary,
       isContextPreparing,
+      isDraftChatSession,
       isTyping,
       messages,
       needsExternalContextForNextSend,
       needsFullContextForNextSend,
+      fetchChatSessions,
+      resolveBackendChatSession,
+      syncAnalyzeSessionUrl,
     ],
   );
 
   const handleSend = useCallback(() => {
     void sendMessage(input);
   }, [input, sendMessage]);
+
+  const handleComposerKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (event.key !== "Enter") return;
+
+      const nativeEvent = event.nativeEvent as KeyboardEvent & { isComposing?: boolean; keyCode?: number };
+      const isComposing = Boolean(nativeEvent.isComposing) || nativeEvent.keyCode === 229;
+      if (isComposing) {
+        return;
+      }
+
+      if (event.shiftKey) return;
+
+      event.preventDefault();
+      handleSend();
+    },
+    [handleSend],
+  );
+
+  const handleNewChatSession = useCallback(() => {
+    chatSessionSwitchRef.current += 1;
+    sessionSwitchRef.current += 1;
+    historyDetailRequestRef.current += 1;
+    contextTransitionRef.current += 1;
+    pendingUrlSessionIdRef.current = null;
+    suppressUrlSessionRestoreRef.current = true;
+    hasInitializedDefaultSessionRef.current = true;
+
+    setActiveTab("chat");
+    setInput("");
+    setMessages([{ role: "assistant", content: DEFAULT_CHAT_OPENING }]);
+    setIsTyping(false);
+    setIsContextPreparing(false);
+    setSessionHydrated(true);
+    setIsDraftChatSession(true);
+
+    setActiveChatVideoId(null);
+    setActiveChatSessionId(null);
+    setSelectedHistoryVideoId(null);
+    setHistoryDetail(null);
+    setHistoryPoseData(null);
+    setHistoryReport(null);
+    setHistoryDetailLoading(false);
+    setHistoryReportLoading(false);
+    setHistoryReportAction(null);
+    setHistoryDetailError(null);
+    setHistoryReportError(null);
+    setChatContextPack(null);
+    setChatContextSummary("");
+    setChatContextStatus(null);
+    setChatSuggestedPrompts(DEFAULT_QUICK_PROMPTS);
+    setNeedsFullContextForNextSend(false);
+
+    setExternalContextPayload(null);
+    setExternalContextSummary("");
+    setExternalContextStatus(null);
+    setNeedsExternalContextForNextSend(false);
+    setPendingAutoQuestion(null);
+
+    syncAnalyzeSessionUrl(null);
+  }, [syncAnalyzeSessionUrl]);
+
+  const handleDeleteChatSession = useCallback(
+    async (session: ChatSessionRecord) => {
+      if (!session.id || deletingSessionId === session.id) return;
+
+      const normalizedType = normalizeSessionType(session.session_type);
+      const isVideoSession = normalizedType === SESSION_TYPE_VIDEO && Boolean(session.video_id);
+      const confirmMessage = isVideoSession
+        ? "Delete this video session?\n\nThis will permanently delete all related video-analysis sessions, messages, video assets, and reports for this video. This action cannot be undone."
+        : "Delete this session and all its messages? This action cannot be undone.";
+
+      if (!window.confirm(confirmMessage)) {
+        return;
+      }
+
+      setDeletingSessionId(session.id);
+      try {
+        const response = await authFetch(`/chat/sessions/${encodeURIComponent(session.id)}`, {
+          method: "DELETE",
+        });
+        if (!response.ok) {
+          throw new Error(await parseApiError(response, "Failed to delete session"));
+        }
+
+        const deleted = (await response.json()) as ChatSessionDeleteResponse;
+        const deletedVideoId = deleted.video_id || null;
+        if (deletedVideoId && typeof window !== "undefined") {
+          window.localStorage.removeItem(buildSessionStorageKey(deletedVideoId));
+          clearCachedAnalysisReports(deletedVideoId);
+        }
+
+        const clearedCurrentVideo =
+          deleted.deleted_scope === "video_full" &&
+          Boolean(deletedVideoId) &&
+          activeChatVideoId === deletedVideoId;
+        const clearedCurrentSession = activeChatSessionId === session.id;
+
+        if (deletedVideoId && selectedHistoryVideoId === deletedVideoId) {
+          setSelectedHistoryVideoId(null);
+          setHistoryDetail(null);
+          setHistoryPoseData(null);
+          setHistoryReport(null);
+          setHistoryDetailError(null);
+          setHistoryReportError(null);
+        }
+
+        if (clearedCurrentSession || clearedCurrentVideo) {
+          handleNewChatSession();
+        }
+
+        await fetchChatSessions({ silent: true });
+        if (deleted.deleted_scope === "video_full") {
+          await fetchHistoryVideos();
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to delete session";
+        setChatSessionsError(message);
+        window.alert(message);
+      } finally {
+        setDeletingSessionId(null);
+      }
+    },
+    [
+      activeChatSessionId,
+      activeChatVideoId,
+      deletingSessionId,
+      fetchChatSessions,
+      fetchHistoryVideos,
+      handleNewChatSession,
+      selectedHistoryVideoId,
+    ],
+  );
 
   useEffect(() => {
     if (!pendingAutoQuestion) return;
@@ -1412,54 +2440,114 @@ function AnalyzeContent() {
   const selectedWeaponStyle = getWeaponStyle(selectedWeapon);
   const selectedWeaponNote = WEAPON_TYPE_NOTES[selectedWeapon] ?? WEAPON_TYPE_NOTES.epee;
 
-  const filteredHistoryVideos = useMemo(() => {
-    const query = historySearch.trim().toLowerCase();
+  const historyVideoById = useMemo(() => {
+    const map = new Map<string, HistoryItem>();
+    for (const video of historyVideos) {
+      map.set(video.video_id, video);
+    }
+    return map;
+  }, [historyVideos]);
 
-    const base = historyVideos.filter((video) => {
+  const getSessionTitle = useCallback(
+    (session: ChatSessionRecord) => {
+      const normalizedType = normalizeSessionType(session.session_type);
+      const customTitle = session.title?.trim();
+      if (customTitle) return customTitle;
+
+      if (normalizedType === SESSION_TYPE_VIDEO) {
+        if (session.video_id) {
+          return historyVideoById.get(session.video_id)?.title || "Video Analysis";
+        }
+        return "Video Analysis";
+      }
+      if (normalizedType === SESSION_TYPE_TRAINING) {
+        return "Training Analysis";
+      }
+      return "Assistant Chat";
+    },
+    [historyVideoById],
+  );
+
+  const getSessionSubtitle = useCallback(
+    (session: ChatSessionRecord) => {
+      const normalizedType = normalizeSessionType(session.session_type);
+      const video = session.video_id ? historyVideoById.get(session.video_id) : null;
+
+      if (normalizedType === SESSION_TYPE_VIDEO && video) {
+        return [video.athlete, video.opponent ? `vs ${video.opponent}` : "", video.tournament]
+          .filter(Boolean)
+          .join(" ")
+          || "Video coaching thread";
+      }
+
+      if (session.context_summary?.trim()) {
+        return session.context_summary.trim();
+      }
+
+      if (normalizedType === SESSION_TYPE_TRAINING) {
+        return "Training record analysis thread";
+      }
+      if (normalizedType === SESSION_TYPE_VIDEO) {
+        return "Video coaching thread";
+      }
+      return "General AI Q&A thread";
+    },
+    [historyVideoById],
+  );
+
+  const filteredChatSessions = useMemo(() => {
+    const query = sessionSearch.trim().toLowerCase();
+
+    const base = chatSessions.filter((session) => {
       if (!query) return true;
-
-      const text = [video.title, video.athlete, video.opponent, video.tournament]
+      const normalizedType = normalizeSessionType(session.session_type);
+      const video = session.video_id ? historyVideoById.get(session.video_id) : null;
+      const text = [
+        getSessionTitle(session),
+        getSessionSubtitle(session),
+        SESSION_META[normalizedType].label,
+        video?.title,
+        video?.athlete,
+        video?.opponent,
+        video?.tournament,
+      ]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
-
       return text.includes(query);
     });
 
-    return base.sort((a, b) => {
-      const aTime = new Date(a.upload_time).getTime();
-      const bTime = new Date(b.upload_time).getTime();
-      return bTime - aTime;
-    });
-  }, [historyVideos, historySearch]);
+    return base.sort((a, b) => getSessionTimestamp(b) - getSessionTimestamp(a));
+  }, [chatSessions, getSessionSubtitle, getSessionTitle, historyVideoById, sessionSearch]);
 
-  const groupedHistoryVideos = useMemo<HistoryGroup[]>(() => {
-    const today: HistoryItem[] = [];
-    const week: HistoryItem[] = [];
-    const earlier: HistoryItem[] = [];
+  const groupedChatSessions = useMemo<HistoryGroup[]>(() => {
+    const today: ChatSessionRecord[] = [];
+    const week: ChatSessionRecord[] = [];
+    const earlier: ChatSessionRecord[] = [];
 
     const now = new Date();
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
-    for (const video of filteredHistoryVideos) {
-      const uploadDate = new Date(video.upload_time);
-      if (Number.isNaN(uploadDate.getTime())) {
-        earlier.push(video);
+    for (const session of filteredChatSessions) {
+      const sessionTime = getSessionTimestamp(session);
+      if (!sessionTime) {
+        earlier.push(session);
         continue;
       }
 
-      if (uploadDate >= todayStart) {
-        today.push(video);
+      const sessionDate = new Date(sessionTime);
+      if (sessionDate >= todayStart) {
+        today.push(session);
         continue;
       }
 
-      const diffMs = now.getTime() - uploadDate.getTime();
+      const diffMs = now.getTime() - sessionTime;
       const diffDays = diffMs / (1000 * 60 * 60 * 24);
 
       if (diffDays <= 7) {
-        week.push(video);
+        week.push(session);
       } else {
-        earlier.push(video);
+        earlier.push(session);
       }
     }
 
@@ -1470,30 +2558,30 @@ function AnalyzeContent() {
     ];
 
     return groups.filter((group) => group.items.length > 0);
-  }, [filteredHistoryVideos]);
+  }, [filteredChatSessions]);
 
-  const renderHistoryRows = (compact: boolean) => {
-    if (historyLoading) {
+  const renderSessionRows = (compact: boolean) => {
+    if (chatSessionsLoading) {
       return (
         <div className="space-y-2">
           {Array.from({ length: compact ? 6 : 5 }).map((_, idx) => (
             <div
               // eslint-disable-next-line react/no-array-index-key
               key={idx}
-              className={`${compact ? "h-10" : "h-16"} rounded-xl bg-muted animate-pulse`}
+              className={`${compact ? "h-10" : "h-20"} animate-pulse rounded-xl bg-muted`}
             />
           ))}
         </div>
       );
     }
 
-    if (historyError) {
+    if (chatSessionsError) {
       return (
         <div className="rounded-2xl border border-red-200 bg-red-50/70 p-3 text-sm text-red-600">
-          <p>{historyError}</p>
+          <p>{chatSessionsError}</p>
           <button
             type="button"
-            onClick={fetchHistoryVideos}
+            onClick={() => void fetchChatSessions()}
             className="mt-2 rounded-lg border border-red-200 px-2 py-1 text-xs font-semibold hover:bg-red-100"
           >
             Retry
@@ -1502,67 +2590,82 @@ function AnalyzeContent() {
       );
     }
 
-    if (filteredHistoryVideos.length === 0) {
-      if (historyVideos.length === 0) {
+    if (filteredChatSessions.length === 0) {
+      if (chatSessions.length === 0) {
         return (
           <div className="rounded-2xl border border-dashed border-border p-4 text-center text-sm text-muted-foreground">
-            No videos yet. Upload your first bout.
+            No sessions yet. Start a new chat.
           </div>
         );
       }
-
       return (
         <div className="rounded-2xl border border-dashed border-border p-4 text-center text-sm text-muted-foreground">
-          No records match your filters.
+          No sessions match your filters.
         </div>
       );
     }
 
     if (compact) {
       return (
-        <div className="h-full space-y-2 overflow-x-hidden overflow-y-auto pr-0.5">
-          {filteredHistoryVideos.map((video) => {
-            const selected = selectedHistoryVideoId === video.video_id;
-            const color = getWeaponColor(video.weapon);
+        <div className="hide-scrollbar h-full overflow-x-hidden overflow-y-auto pr-1 pl-0.5">
+          <div className="space-y-2.5 pb-1">
+            {filteredChatSessions.map((session) => {
+              const normalizedType = normalizeSessionType(session.session_type);
+              const selected = activeChatSessionId === session.id;
+              const meta = SESSION_META[normalizedType];
+              const dotColor = getSessionDotColor(normalizedType);
 
-            return (
-              <button
-                key={video.video_id}
-                type="button"
-                onClick={() => handleSelectHistoryVideo(video.video_id)}
-                className={`group mx-auto flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border transition-all ${
-                  selected
-                    ? "border-red-400 bg-red-50 text-red-600"
-                    : "border-border bg-card text-muted-foreground hover:border-red-300 hover:text-foreground"
-                }`}
-                title={video.title || "Untitled video"}
-              >
-                <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: color }} />
-              </button>
-            );
-          })}
+              return (
+                <button
+                  key={session.id}
+                  type="button"
+                  onClick={() => handleSelectChatSession(session.id)}
+                  className={`group mx-auto flex h-10 w-11 shrink-0 items-center justify-center rounded-xl border px-2 transition-all ${
+                    selected
+                      ? "border-foreground/25 bg-muted/70 shadow-sm"
+                      : "border-border bg-card hover:border-red-300 hover:bg-card/80"
+                  }`}
+                  title={`${meta.label} • ${getSessionTitle(session)}`}
+                >
+                  <span
+                    className="h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-black/10 dark:ring-white/10"
+                    style={{ backgroundColor: dotColor }}
+                  />
+                </button>
+              );
+            })}
+          </div>
         </div>
       );
     }
 
     return (
       <div className="h-full space-y-5 overflow-y-auto pr-1">
-        {groupedHistoryVideos.map((group) => (
+        {groupedChatSessions.map((group) => (
           <div key={group.key}>
             <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
               {group.label}
             </p>
             <div className="space-y-2">
-              {group.items.map((video) => {
-                const selected = selectedHistoryVideoId === video.video_id;
-                const resultLabel = getResultLabel(video.match_result);
+              {group.items.map((session) => {
+                const normalizedType = normalizeSessionType(session.session_type);
+                const selected = activeChatSessionId === session.id;
+                const meta = SESSION_META[normalizedType];
+                const activityTime = session.last_message_at || session.updated_at || session.created_at;
 
                 return (
-                  <button
-                    key={video.video_id}
-                    type="button"
-                    onClick={() => handleSelectHistoryVideo(video.video_id)}
-                    className={`w-full rounded-2xl border p-3 text-left transition-all ${
+                  <div
+                    key={session.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => handleSelectChatSession(session.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        handleSelectChatSession(session.id);
+                      }
+                    }}
+                    className={`w-full cursor-pointer rounded-2xl border p-3 text-left transition-all ${
                       selected
                         ? "border-red-300 bg-red-50/80 shadow-sm"
                         : "border-border bg-card hover:border-red-200 hover:bg-card/80"
@@ -1570,36 +2673,44 @@ function AnalyzeContent() {
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
-                        <p className="truncate text-sm font-semibold text-foreground">
-                          {video.title || "Untitled Video"}
-                        </p>
-                        <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                          {[video.athlete, video.opponent ? `vs ${video.opponent}` : "", video.tournament]
-                            .filter(Boolean)
-                            .join(" ") || "No metadata"}
-                        </p>
+                        <p className="truncate text-sm font-semibold text-foreground">{getSessionTitle(session)}</p>
+                        <p className="mt-0.5 truncate text-xs text-muted-foreground">{getSessionSubtitle(session)}</p>
                       </div>
-                      <span
-                        className="rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                        style={{
-                          backgroundColor: `${getWeaponColor(video.weapon)}20`,
-                          color: getWeaponColor(video.weapon),
-                        }}
-                      >
-                        {getWeaponLabel(video.weapon)}
+                      <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ${meta.badgeClass}`}>
+                        {meta.label}
                       </span>
                     </div>
 
                     <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                      <span>{formatRelativeTime(video.upload_time)}</span>
-                      {resultLabel && (
-                        <span className="rounded-full bg-secondary px-2 py-0.5 text-[11px] font-semibold text-secondary-foreground">
-                          {resultLabel}
-                        </span>
-                      )}
-                      {video.score && <span className="font-mono">{video.score}</span>}
+                      <span>{formatRelativeTime(activityTime)}</span>
+                      <span className="rounded-full bg-secondary px-2 py-0.5 text-[11px] font-semibold text-secondary-foreground">
+                        {session.message_count} msgs
+                      </span>
+                      {normalizedType === SESSION_TYPE_VIDEO && session.video_id ? (
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleOpenVideoDetail(session.video_id!);
+                          }}
+                          className="rounded-full border border-border bg-card px-2 py-0.5 text-[11px] font-semibold text-foreground transition-colors hover:border-red-300 hover:text-red-600"
+                        >
+                          Open Video Detail
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void handleDeleteChatSession(session);
+                        }}
+                        disabled={deletingSessionId === session.id}
+                        className="rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[11px] font-semibold text-red-600 transition-colors hover:border-red-300 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-800 dark:bg-red-900/30 dark:text-red-300"
+                      >
+                        {deletingSessionId === session.id ? "Deleting..." : "Delete"}
+                      </button>
                     </div>
-                  </button>
+                  </div>
                 );
               })}
             </div>
@@ -1609,13 +2720,106 @@ function AnalyzeContent() {
     );
   };
 
-  return (
-    <div className="min-h-screen bg-background overflow-hidden">
-      <div className="fixed inset-0 -z-10 overflow-hidden">
-        <div className="absolute top-0 left-1/4 h-[500px] w-[500px] rounded-full bg-red-500/5 blur-[100px]" />
-        <div className="absolute right-1/4 bottom-0 h-[400px] w-[400px] rounded-full bg-amber-500/5 blur-[80px]" />
-      </div>
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
 
+    const syncReportUpdate = (videoId: string, nextReport?: AnalysisReportRecord | null) => {
+      if (!videoId || videoId !== selectedHistoryVideoId) {
+        return;
+      }
+
+      const resolvedReport = nextReport ?? readCachedAnalysisReport<AnalysisReportRecord>(
+        videoId,
+        selectedHistoryAthleteSlot,
+      );
+      if (!resolvedReport) {
+        return;
+      }
+
+      if ((resolvedReport.athlete_slot ?? getDefaultAthleteSlot(historyPoseData)) !== selectedHistoryAthleteSlot) {
+        return;
+      }
+
+      setHistoryReport(resolvedReport);
+
+      if (
+        videoId === activeChatVideoId &&
+        historyDetail &&
+        historyPoseData
+      ) {
+        const refreshedArtifacts = buildContextArtifacts(
+          historyDetail,
+          historyPoseData,
+          selectedHistoryAthleteSlot,
+          buildReportContextText(resolvedReport),
+        );
+        setChatContextSummary(refreshedArtifacts.contextSummary);
+        setChatContextStatus(refreshedArtifacts.contextStatus);
+        setChatSuggestedPrompts(refreshedArtifacts.suggestedPrompts);
+        setNeedsFullContextForNextSend(true);
+        setChatContextPack(null);
+      }
+    };
+
+    const handleStorage = (event: StorageEvent) => {
+      if (!event.key) {
+        return;
+      }
+
+      const cacheMeta = parseAnalysisReportCacheKey(event.key);
+      if (!cacheMeta) {
+        return;
+      }
+      let nextReport: AnalysisReportRecord | null = null;
+      if (event.newValue) {
+        try {
+          nextReport = JSON.parse(event.newValue) as AnalysisReportRecord;
+        } catch {
+          nextReport = null;
+        }
+      }
+      if ((cacheMeta.athleteSlot ?? getDefaultAthleteSlot(historyPoseData)) !== selectedHistoryAthleteSlot) {
+        return;
+      }
+      syncReportUpdate(cacheMeta.videoId, nextReport);
+    };
+
+    const handleReportUpdated = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          videoId?: string;
+          athleteSlot?: AthleteSlot | null;
+          report?: AnalysisReportRecord | null;
+        }>
+      ).detail;
+      if (!detail?.videoId) {
+        return;
+      }
+      if ((detail.athleteSlot ?? getDefaultAthleteSlot(historyPoseData)) !== selectedHistoryAthleteSlot) {
+        return;
+      }
+      syncReportUpdate(detail.videoId, detail.report ?? null);
+    };
+
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener(ANALYSIS_REPORT_UPDATED_EVENT, handleReportUpdated as EventListener);
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener(ANALYSIS_REPORT_UPDATED_EVENT, handleReportUpdated as EventListener);
+    };
+  }, [
+    activeChatVideoId,
+    buildContextArtifacts,
+    historyDetail,
+    historyPoseData,
+    selectedHistoryAthleteSlot,
+    selectedHistoryVideoId,
+  ]);
+
+  return (
+    <div className="min-h-screen bg-background">
       <TopNav activeHref="/analyze" links={[...ANALYZE_NAV_LINKS]} />
 
       <main className="pt-24 pb-8">
@@ -1629,7 +2833,7 @@ function AnalyzeContent() {
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
               </svg>
-              History
+              Sessions
             </button>
           </div>
 
@@ -1657,41 +2861,50 @@ function AnalyzeContent() {
                     <div className="mb-3 flex items-center justify-center rounded-xl bg-secondary/60 p-2 text-center">
                       <div className="space-y-0.5">
                         <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Rec</p>
-                        <p className="text-sm font-semibold leading-none text-foreground">{historyVideos.length}</p>
+                        <p className="text-sm font-semibold leading-none text-foreground">{chatSessions.length}</p>
                       </div>
                     </div>
-                    <div className="min-h-0 flex-1 overflow-hidden">{renderHistoryRows(true)}</div>
+                    <div className="min-h-0 flex-1 overflow-hidden">{renderSessionRows(true)}</div>
                   </>
                 ) : (
                   <>
                     <div className="mb-3 flex items-center justify-between gap-2">
                       <div>
-                        <p className="text-sm font-semibold">History</p>
-                        <p className="text-xs text-muted-foreground">{historyVideos.length} videos</p>
+                        <p className="text-sm font-semibold">Sessions</p>
+                        <p className="text-xs text-muted-foreground">{chatSessions.length} threads</p>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => setIsSidebarCollapsed(true)}
-                        className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-border bg-card text-muted-foreground hover:text-foreground"
-                        aria-label="Collapse history sidebar"
-                      >
-                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
-                        </svg>
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handleNewChatSession}
+                          className="rounded-full border border-border bg-card px-3 py-1 text-xs font-semibold transition-colors hover:border-red-300 hover:text-red-600"
+                        >
+                          New Session
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setIsSidebarCollapsed(true)}
+                          className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-border bg-card text-muted-foreground hover:text-foreground"
+                          aria-label="Collapse session sidebar"
+                        >
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+                          </svg>
+                        </button>
+                      </div>
                     </div>
 
                     <div className="mb-3">
                       <input
                         type="text"
-                        value={historySearch}
-                        onChange={(e) => setHistorySearch(e.target.value)}
-                        placeholder="Search title, athlete, opponent..."
+                        value={sessionSearch}
+                        onChange={(e) => setSessionSearch(e.target.value)}
+                        placeholder="Search session, summary..."
                         className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm"
                       />
                     </div>
 
-                    <div className="min-h-0 flex-1 overflow-hidden">{renderHistoryRows(false)}</div>
+                    <div className="min-h-0 flex-1 overflow-hidden">{renderSessionRows(false)}</div>
                   </>
                 )}
               </div>
@@ -1712,7 +2925,7 @@ function AnalyzeContent() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setActiveTab("analyze")}
+                  onClick={handleEnterVideoAnalysis}
                   className={`rounded-xl px-4 py-2 text-sm font-semibold transition-all ${
                     activeTab === "analyze"
                       ? "bg-background text-red-600 shadow"
@@ -1764,6 +2977,9 @@ function AnalyzeContent() {
                         <h3 className="mb-3 text-2xl font-bold">Drop your video here</h3>
                         <p className="mb-2 text-muted-foreground">or click to browse files</p>
                         <p className="text-sm text-muted-foreground/70">Supports MP4, MOV, AVI, WebM - Max 100MB</p>
+                        <div className="mx-auto mt-3 max-w-sm rounded-md border border-border/70 bg-background/80 px-3 py-2 text-xs leading-5 text-muted-foreground">
+                          Best results: one exchange clip, around 30s.
+                        </div>
                         <input
                           ref={fileInputRef}
                           type="file"
@@ -1836,7 +3052,7 @@ function AnalyzeContent() {
                           {analysisMode === "pose" && poseResult && (
                             <div className="space-y-4 rounded-2xl border border-border bg-card p-5">
                               <h4 className="font-semibold">Pose Analysis Results</h4>
-                              <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                              <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
                                 <div className="rounded-xl bg-red-50 p-3 dark:bg-red-900/20">
                                   <p className="text-xs text-muted-foreground">Total Frames</p>
                                   <p className="text-lg font-bold text-red-600">{poseResult.total_frames}</p>
@@ -1845,24 +3061,30 @@ function AnalyzeContent() {
                                   <p className="text-xs text-muted-foreground">Processed</p>
                                   <p className="text-lg font-bold text-amber-600">{poseResult.processed_frames}</p>
                                 </div>
+                                <div className="rounded-xl bg-emerald-50 p-3 dark:bg-emerald-900/20">
+                                  <p className="text-xs text-muted-foreground">Coverage</p>
+                                  <p className="text-lg font-bold text-emerald-600">
+                                    {poseResult.total_frames > 0
+                                      ? `${Math.round((poseResult.processed_frames / poseResult.total_frames) * 100)}%`
+                                      : "0%"}
+                                  </p>
+                                </div>
                               </div>
-                              <div className="flex flex-wrap gap-3">
-                                <a
-                                  href={buildAuthedApiUrl(`/video/${videoFile?.id}/pose-overlay/file`)}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="hover-lift min-w-[200px] flex-1 rounded-xl bg-gradient-to-r from-red-600 to-red-700 p-3 text-center font-medium text-white transition-all hover:shadow-lg hover:shadow-red-500/30"
+                              <div className="rounded-xl border border-border bg-background/70 p-4">
+                                <div className="mb-3">
+                                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                                    Replay
+                                  </p>
+                                  <p className="mt-1 text-sm text-muted-foreground">
+                                    Use the skeleton replay for visual review. Raw pose JSON is hidden from end users.
+                                  </p>
+                                </div>
+                                <Link
+                                  href={videoFile?.id ? `/history/${videoFile.id}?view=skeleton` : "/history"}
+                                  className="hover-lift inline-flex w-full items-center justify-center rounded-xl bg-red-600 px-4 py-3 text-center font-medium text-white transition-colors hover:bg-red-700"
                                 >
-                                  View Skeleton Overlay
-                                </a>
-                                <a
-                                  href={buildAuthedApiUrl(`/video/${videoFile?.id}/pose-data`)}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="min-w-[200px] flex-1 rounded-xl bg-secondary p-3 text-center font-medium transition-colors hover:bg-secondary/80"
-                                >
-                                  View Pose Data
-                                </a>
+                                  Open Full History View
+                                </Link>
                               </div>
                             </div>
                           )}
@@ -2057,11 +3279,15 @@ function AnalyzeContent() {
                     </div>
                   )}
 
+                  <div className="rounded-lg border border-border/70 bg-background/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
+                    Tip: use a single exchange clip around 30s.
+                  </div>
+
                   <button
                     type="button"
                     onClick={handleUpload}
                     disabled={!videoFile || videoFile.status === "uploading" || videoFile.status === "processing"}
-                    className="hover-lift w-full rounded-2xl bg-gradient-to-r from-red-600 to-red-700 py-5 text-lg font-semibold text-white transition-all duration-300 hover:shadow-2xl hover:shadow-red-500/30 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:shadow-none"
+                    className="hover-lift w-full rounded-2xl bg-red-600 py-5 text-lg font-semibold text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {videoFile?.status === "uploading"
                       ? "Uploading..."
@@ -2096,7 +3322,7 @@ function AnalyzeContent() {
                         <div
                           className={`rounded-2xl ${
                             message.role === "user"
-                              ? "max-w-[80%] bg-gradient-to-r from-red-600 to-red-700 p-5 text-white"
+                              ? "max-w-[80%] bg-red-600 p-5 text-white"
                               : "max-w-[88%] bg-secondary p-5 md:max-w-[82%]"
                           }`}
                         >
@@ -2121,58 +3347,17 @@ function AnalyzeContent() {
                     )}
                   </div>
 
-                  <div className="mb-4 rounded-2xl border border-border bg-card p-4">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <p className="text-xs uppercase tracking-wide text-muted-foreground">Context status</p>
-                        {activeChatVideoId && chatContextStatus ? (
-                          <div className="mt-1 space-y-1 text-sm">
-                            <p className="font-semibold text-foreground">
-                              Video: {chatContextStatus.video_title} ({chatContextStatus.video_id.slice(0, 8)}...)
-                            </p>
-                            <p className="text-muted-foreground">
-                              Mode: Full Pose • Coverage: {chatContextStatus.overflow.used_frames}/
-                              {chatContextStatus.overflow.original_frames} (
-                              {Math.round(chatContextStatus.overflow.coverage_ratio * 100)}%)
-                              {chatContextStatus.overflow.truncated ? " • Truncated" : ""}
-                            </p>
-                          </div>
-                        ) : externalContextStatus ? (
-                          <div className="mt-1 space-y-1 text-sm">
-                            <p className="font-semibold text-foreground">
-                              Source: {externalContextStatus.label}
-                            </p>
-                            <p className="text-muted-foreground">
-                              Window: {externalContextStatus.window} • Sessions: {externalContextStatus.entry_count}
-                              {needsExternalContextForNextSend ? " • Full context queued" : ""}
-                            </p>
-                          </div>
-                        ) : (
-                          <p className="mt-1 text-sm text-muted-foreground">
-                            No context attached. Choose a video or jump from Training to provide grounded coaching context.
-                          </p>
-                        )}
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          onClick={handleSwitchVideoFromChat}
-                          className="rounded-xl border border-border px-3 py-1.5 text-xs font-semibold hover:border-red-300"
-                        >
-                          {activeChatVideoId ? "Switch Video" : "Choose Video Context"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={handleClearChatContext}
-                          className="rounded-xl border border-border px-3 py-1.5 text-xs font-semibold text-muted-foreground hover:text-foreground"
-                        >
-                          Clear Context
-                        </button>
-                      </div>
-                    </div>
-                    {isContextPreparing && (
-                      <p className="mt-3 text-xs text-muted-foreground">Preparing full pose context for this video...</p>
-                    )}
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      {activeChatVideoId ? "Video Thread" : "Chat Thread"}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={handleNewChatSession}
+                      className="rounded-full border border-border px-3 py-1 text-xs font-semibold transition-colors hover:border-red-300 hover:text-red-600"
+                    >
+                      New Session
+                    </button>
                   </div>
 
                   <div className="mb-4 flex flex-wrap gap-2">
@@ -2188,25 +3373,45 @@ function AnalyzeContent() {
                     ))}
                   </div>
 
-                  <div className="flex gap-3">
-                    <input
-                      type="text"
-                      value={input}
-                      onChange={(e) => setInput(e.target.value)}
-                      onKeyDown={(e) => e.key === "Enter" && handleSend()}
-                      placeholder="Ask about fencing technique, training tips..."
-                      className="flex-1 rounded-2xl border border-border bg-card p-5 text-lg focus:border-transparent focus:outline-none focus:ring-2 focus:ring-red-500"
-                    />
-                    <button
-                      type="button"
-                      onClick={handleSend}
-                      disabled={!input.trim() || isTyping || isContextPreparing}
-                      className="hover-lift rounded-2xl bg-gradient-to-r from-red-600 to-red-700 px-8 py-5 font-semibold text-white transition-all duration-300 hover:shadow-lg hover:shadow-red-500/30 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-                      </svg>
-                    </button>
+                  <div className="rounded-[28px] border border-border bg-card p-4 shadow-sm">
+                    <div className="flex items-end gap-3">
+                      <textarea
+                        value={input}
+                        onChange={(e) => setInput(e.target.value)}
+                        onKeyDown={handleComposerKeyDown}
+                        placeholder="输入你的问题..."
+                        rows={2}
+                        className="min-h-[72px] flex-1 resize-none bg-transparent px-2 py-1 text-lg leading-7 text-foreground placeholder:text-muted-foreground focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleSend}
+                        disabled={!input.trim() || isTyping || isContextPreparing}
+                        className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-600 text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-45"
+                        aria-label="Send"
+                      >
+                        <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.4} d="M5 12h14m-6-6 6 6-6 6" />
+                        </svg>
+                      </button>
+                    </div>
+                    <div className="mt-2 flex items-center justify-end text-[11px] font-medium text-muted-foreground">
+                      <span>Press Enter to send · Shift + Enter for a new line</span>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 rounded-lg border border-border/60 bg-background/70 px-3 py-2">
+                    <p className="text-center text-xs leading-5 text-muted-foreground">
+                      AI suggestions are for reference only.
+                    </p>
+                    {externalContextStatus && !activeChatVideoId ? (
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                        Current source: {externalContextStatus.label} ({externalContextStatus.window})
+                      </p>
+                    ) : null}
+                    {isContextPreparing ? (
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground">Preparing video context...</p>
+                    ) : null}
                   </div>
                 </div>
               )}
@@ -2257,15 +3462,30 @@ function AnalyzeContent() {
                               Uploaded {formatRelativeTime(historyDetail.upload_time)}
                             </p>
                           </div>
-                          <span
-                            className="rounded-full px-3 py-1 text-sm font-semibold"
-                            style={{
-                              backgroundColor: `${getWeaponColor(historyDetail.weapon)}20`,
-                              color: getWeaponColor(historyDetail.weapon),
-                            }}
-                          >
-                            {getWeaponLabel(historyDetail.weapon)}
-                          </span>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Link
+                              href={`/history/${selectedHistoryVideoId}`}
+                              className="rounded-full border border-border bg-card px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-red-300 hover:bg-muted"
+                            >
+                              Open Full History Page
+                            </Link>
+                            <button
+                              type="button"
+                              onClick={handleAskAiAboutHistory}
+                              className="rounded-full bg-red-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-700"
+                            >
+                              Ask AI About This Match
+                            </button>
+                            <span
+                              className="rounded-full px-3 py-1 text-sm font-semibold"
+                              style={{
+                                backgroundColor: `${getWeaponColor(historyDetail.weapon)}20`,
+                                color: getWeaponColor(historyDetail.weapon),
+                              }}
+                            >
+                              {getWeaponLabel(historyDetail.weapon)}
+                            </span>
+                          </div>
                         </div>
 
                         <div className="mt-5 grid gap-4 md:grid-cols-3">
@@ -2299,22 +3519,42 @@ function AnalyzeContent() {
 
                       <div className="glass-card rounded-3xl p-6">
                         <div className="mb-4 flex items-center justify-between gap-3">
-                          <h3 className="text-lg font-semibold">AI Analysis Report</h3>
-                          {historyPoseData && !historyReportLoading && (
-                            <button
-                              type="button"
-                              onClick={handleGenerateHistoryReport}
-                              className="rounded-xl bg-gradient-to-r from-red-600 to-red-700 px-4 py-2 text-sm font-semibold text-white"
-                            >
-                              {historyReport ? "Regenerate Report" : "Generate Report"}
-                            </button>
-                          )}
+                          <div>
+                            <h3 className="text-lg font-semibold">AI Analysis Report</h3>
+                            {historyPoseData ? (
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                Current report target: {getAthleteSlotLabel(selectedHistoryAthleteSlot)}. Switching athlete only loads saved reports.
+                              </p>
+                            ) : null}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-3">
+                            {hasDualHistoryAthletes ? (
+                              <div className="inline-flex rounded-xl border border-border bg-card p-1">
+                                {historyAthleteSlots.map((slot) => (
+                                  <button
+                                    key={slot}
+                                    type="button"
+                                    onClick={() => setSelectedHistoryAthleteSlot(slot)}
+                                    className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                                      selectedHistoryAthleteSlot === slot
+                                        ? "bg-primary text-primary-foreground"
+                                        : "text-muted-foreground hover:text-foreground"
+                                    }`}
+                                  >
+                                    {getAthleteSlotShortLabel(slot)}
+                                  </button>
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
                         </div>
 
                         {historyReportLoading && (
                           <div className="flex items-center gap-3 rounded-xl border border-border bg-card p-4">
                             <div className="h-5 w-5 animate-spin rounded-full border-2 border-red-500 border-t-transparent" />
-                            <p className="text-sm text-muted-foreground">Generating report...</p>
+                            <p className="text-sm text-muted-foreground">
+                              {historyReportAction === "generate" ? "Generating report..." : "Loading saved report..."}
+                            </p>
                           </div>
                         )}
 
@@ -2333,6 +3573,23 @@ function AnalyzeContent() {
                               <span>Updated {formatRelativeTime(historyReport.updated_at)}</span>
                             </div>
                             <ReportMarkdown content={historyReport.report} summary={historyReport.summary} />
+                            {historyPoseData && (
+                              <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
+                                <p className="text-xs text-muted-foreground">
+                                  Need a fresh pass for {getAthleteSlotLabel(selectedHistoryAthleteSlot)}?
+                                </p>
+                                <button
+                                  type="button"
+                                  onClick={handleGenerateHistoryReport}
+                                  disabled={historyReportLoading}
+                                  className="rounded-xl bg-red-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+                                >
+                                  {historyReportLoading && historyReportAction === "generate"
+                                    ? "Regenerating..."
+                                    : `Regenerate ${getAthleteSlotShortLabel(selectedHistoryAthleteSlot)} Report`}
+                                </button>
+                              </div>
+                            )}
                           </div>
                         )}
 
@@ -2341,33 +3598,24 @@ function AnalyzeContent() {
                             No pose data available for this video yet. Run pose analysis first.
                           </div>
                         )}
-                      </div>
 
-                      <div className="glass-card rounded-3xl p-6">
-                        <h3 className="mb-4 text-lg font-semibold">Quick Actions</h3>
-                        <div className="flex flex-wrap gap-3">
-                          <button
-                            type="button"
-                            onClick={handleAskAiAboutHistory}
-                            className="rounded-xl bg-gradient-to-r from-red-600 to-red-700 px-4 py-2 text-sm font-semibold text-white"
-                          >
-                            Ask AI About This Match
-                          </button>
-                          <Link
-                            href={`/history/${selectedHistoryVideoId}`}
-                            className="rounded-xl border border-border bg-card px-4 py-2 text-sm font-semibold text-foreground hover:border-red-300"
-                          >
-                            Open Full History Page
-                          </Link>
-                          <a
-                            href={buildAuthedApiUrl(`/video/${selectedHistoryVideoId}/pose-data`)}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="rounded-xl border border-border bg-card px-4 py-2 text-sm font-semibold text-foreground hover:border-red-300"
-                          >
-                            Open Pose Data
-                          </a>
-                        </div>
+                        {!historyReport && !historyReportLoading && !historyReportError && historyPoseData && (
+                          <div className="rounded-xl border border-border bg-card p-4">
+                            <p className="text-sm text-muted-foreground">
+                              No saved report found for {getAthleteSlotLabel(selectedHistoryAthleteSlot)}.
+                            </p>
+                            <div className="mt-3">
+                              <button
+                                type="button"
+                                onClick={handleGenerateHistoryReport}
+                                disabled={historyReportLoading}
+                                className="rounded-xl bg-red-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                Generate {getAthleteSlotShortLabel(selectedHistoryAthleteSlot)} Report
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </>
                   )}
@@ -2390,8 +3638,8 @@ function AnalyzeContent() {
           <div className="absolute inset-y-0 left-0 flex w-[88%] max-w-sm flex-col border-r border-border bg-background p-4 shadow-2xl">
             <div className="mb-4 flex items-center justify-between">
               <div>
-                <p className="text-sm font-semibold">History</p>
-                <p className="text-xs text-muted-foreground">{historyVideos.length} videos</p>
+                <p className="text-sm font-semibold">Sessions</p>
+                <p className="text-xs text-muted-foreground">{chatSessions.length} threads</p>
               </div>
               <button
                 type="button"
@@ -2407,14 +3655,27 @@ function AnalyzeContent() {
             <div className="mb-3">
               <input
                 type="text"
-                value={historySearch}
-                onChange={(e) => setHistorySearch(e.target.value)}
-                placeholder="Search..."
+                value={sessionSearch}
+                onChange={(e) => setSessionSearch(e.target.value)}
+                placeholder="Search session..."
                 className="w-full rounded-xl border border-border bg-card px-3 py-2 text-sm"
               />
             </div>
 
-            <div className="min-h-0 flex-1 overflow-hidden">{renderHistoryRows(false)}</div>
+            <div className="mb-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsMobileSidebarOpen(false);
+                  handleNewChatSession();
+                }}
+                className="w-full rounded-full border border-border bg-card px-3 py-2 text-xs font-semibold transition-colors hover:border-red-300 hover:text-red-600"
+              >
+                New Session
+              </button>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-hidden">{renderSessionRows(false)}</div>
           </div>
         </div>
       )}

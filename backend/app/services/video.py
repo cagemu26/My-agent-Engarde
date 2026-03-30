@@ -175,5 +175,57 @@ File analyzed: {video_path}"""
             return True
         return False
 
+    def delete_video_assets(self, video_id: str) -> dict:
+        """
+        Delete the uploaded video file and metadata for a video id.
+
+        Returns a summary dictionary for observability.
+        """
+        deleted_video = False
+        deleted_metadata = False
+
+        metadata = self.get_video_metadata(video_id) or {}
+        preferred_path = metadata.get("file_path")
+        candidate_paths = []
+        if preferred_path:
+            candidate_paths.append(Path(preferred_path))
+
+        # Fallback: remove all files whose stem matches video_id under upload root.
+        for file_path in self.upload_dir.glob(f"{video_id}.*"):
+            if file_path.is_file():
+                candidate_paths.append(file_path)
+
+        # De-duplicate candidate paths.
+        unique_paths = []
+        seen = set()
+        for file_path in candidate_paths:
+            key = str(file_path)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_paths.append(file_path)
+
+        for file_path in unique_paths:
+            try:
+                if file_path.exists():
+                    file_path.unlink()
+                    deleted_video = True
+            except OSError:
+                continue
+
+        metadata_path = self._get_metadata_path(video_id)
+        try:
+            if metadata_path.exists():
+                metadata_path.unlink()
+                deleted_metadata = True
+        except OSError:
+            deleted_metadata = False
+
+        return {
+            "video_id": video_id,
+            "deleted_video_file": deleted_video,
+            "deleted_metadata_file": deleted_metadata,
+        }
+
 
 video_service = VideoService()

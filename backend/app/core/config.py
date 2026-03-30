@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     KB_COLLECTION: str = "fencing_knowledge"
 
     VIDEO_UPLOAD_DIR: str = "./data/videos"
+    POSE_LANDMARKER_MODEL_PATH: str = "./data/models/pose_landmarker_heavy.task"
+    POSE_LANDMARKER_MODEL_URL: str = (
+        "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
+        "pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task"
+    )
 
     MINIMAX_API_KEY: str = ""
     MINIMAX_BASE_URL: str = "https://api.minimaxi.com/v1"

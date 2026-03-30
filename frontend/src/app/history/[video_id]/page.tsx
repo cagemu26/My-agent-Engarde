@@ -1,14 +1,34 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
+import {
+  ensureAnalysisReport,
+  parseAnalysisReportCacheKey,
+  readCachedAnalysisReport,
+  startAnalysisReportJob,
+  waitForAnalysisReportJob,
+} from "@/lib/analysis-report";
 import { authFetch, buildAuthedApiUrl } from "@/lib/api";
+import {
+  getAthleteSlotLabel,
+  getAthleteSlotShortLabel,
+  getAvailableAthleteSlots,
+  getDefaultAthleteSlot,
+  getSlotPoseFrames,
+  hasDualAthletePose,
+  readPoseLandmark,
+  type AthleteSlot,
+  type PoseData,
+  type SlotPoseFrame,
+} from "@/lib/pose-data";
 import { ReportMarkdown } from "@/components/report-markdown";
 import { TopNav } from "@/components/top-nav";
 
 const HISTORY_DETAIL_NAV_LINKS = [
   { href: "/analyze", label: "Analyze" },
+  { href: "/history", label: "History" },
   { href: "/training", label: "Training" },
   { href: "/feedback", label: "Feedback" },
   { href: "/admin", label: "Admin", adminOnly: true },
@@ -26,23 +46,10 @@ interface VideoMetadata {
   upload_time: string;
 }
 
-interface PoseData {
-  pose_sequence: Array<{
-    frame_index: number;
-    landmarks: number[][];
-    visibility: number[];
-  }>;
-  video_properties: {
-    width: number;
-    height: number;
-    fps: number;
-    frame_count: number;
-  };
-}
-
 interface AnalysisReport {
   report_id: string;
   video_id: string;
+  athlete_slot?: AthleteSlot | null;
   report: string;
   summary: string;
   status: string;
@@ -54,6 +61,417 @@ interface AnalysisReport {
 }
 
 type ReplayMode = "original" | "skeleton";
+
+type HandSide = "left" | "right";
+type DominantSideMode = "auto" | HandSide;
+
+const POSE_INDEX = {
+  nose: 0,
+  left_shoulder: 11,
+  right_shoulder: 12,
+  left_elbow: 13,
+  right_elbow: 14,
+  left_wrist: 15,
+  right_wrist: 16,
+  left_hip: 23,
+  right_hip: 24,
+  left_knee: 25,
+  right_knee: 26,
+  left_ankle: 27,
+  right_ankle: 28,
+} as const;
+
+const POSE_CONFIDENCE_THRESHOLD = 0.45;
+const METRIC_EMA_ALPHA = 0.5;
+
+const METRIC_KEYS = [
+  "trackingQuality",
+  "stanceWidthIndex",
+  "weaponArmExtension",
+  "guardHeight",
+  "handSpeed",
+  "leadKneeAngle",
+  "rearKneeAngle",
+  "weaponArmElbowAngle",
+  "torsoLeanAngle",
+] as const;
+
+type MetricKey = (typeof METRIC_KEYS)[number];
+
+interface MetricSample {
+  value: number | null;
+  confidence: number | null;
+  lowConfidence: boolean;
+}
+
+type FrameMetricSample = Record<MetricKey, MetricSample>;
+
+interface MetricBaseline {
+  p25: number;
+  p75: number;
+}
+
+type MetricBaselines = Partial<Record<MetricKey, MetricBaseline>>;
+
+interface MetricConfig {
+  label: string;
+  hint: string;
+  lowLabel: string;
+  midLabel: string;
+  highLabel: string;
+}
+
+const METRIC_CONFIG: Record<MetricKey, MetricConfig> = {
+  trackingQuality: {
+    label: "Tracking Quality",
+    hint: "Average visibility of the 33 tracked points.",
+    lowLabel: "Low",
+    midLabel: "Stable",
+    highLabel: "High",
+  },
+  stanceWidthIndex: {
+    label: "Stance Width Index",
+    hint: "Ankle distance normalized by shoulder width.",
+    lowLabel: "Narrow",
+    midLabel: "Balanced",
+    highLabel: "Wide",
+  },
+  weaponArmExtension: {
+    label: "Weapon Arm Extension",
+    hint: "Weapon-side wrist to shoulder distance (normalized).",
+    lowLabel: "Short",
+    midLabel: "Ready",
+    highLabel: "Long",
+  },
+  guardHeight: {
+    label: "Guard Height",
+    hint: "Weapon-side hand height relative to shoulder center.",
+    lowLabel: "Low Guard",
+    midLabel: "Neutral",
+    highLabel: "High Guard",
+  },
+  handSpeed: {
+    label: "Hand Speed",
+    hint: "Weapon-side wrist speed, normalized per second.",
+    lowLabel: "Slow",
+    midLabel: "Controlled",
+    highLabel: "Fast",
+  },
+  leadKneeAngle: {
+    label: "Lead Knee Angle",
+    hint: "Hip-knee-ankle angle on the weapon side.",
+    lowLabel: "Deep Bend",
+    midLabel: "Loaded",
+    highLabel: "Extended",
+  },
+  rearKneeAngle: {
+    label: "Rear Knee Angle",
+    hint: "Hip-knee-ankle angle on the rear side.",
+    lowLabel: "Deep Bend",
+    midLabel: "Loaded",
+    highLabel: "Extended",
+  },
+  weaponArmElbowAngle: {
+    label: "Weapon Arm Elbow Angle",
+    hint: "Shoulder-elbow-wrist angle on weapon side.",
+    lowLabel: "Bent",
+    midLabel: "Loaded",
+    highLabel: "Extended",
+  },
+  torsoLeanAngle: {
+    label: "Torso Lean Angle",
+    hint: "Shoulder-hip line lean from vertical.",
+    lowLabel: "Upright",
+    midLabel: "Neutral Lean",
+    highLabel: "Deep Lean",
+  },
+};
+
+interface LandmarkPoint {
+  x: number;
+  y: number;
+  z: number | null;
+  visibility: number | null;
+}
+
+const createMetricSample = (): MetricSample => ({
+  value: null,
+  confidence: null,
+  lowConfidence: false,
+});
+
+const createEmptyFrameMetricSample = (): FrameMetricSample => ({
+  trackingQuality: createMetricSample(),
+  stanceWidthIndex: createMetricSample(),
+  weaponArmExtension: createMetricSample(),
+  guardHeight: createMetricSample(),
+  handSpeed: createMetricSample(),
+  leadKneeAngle: createMetricSample(),
+  rearKneeAngle: createMetricSample(),
+  weaponArmElbowAngle: createMetricSample(),
+  torsoLeanAngle: createMetricSample(),
+});
+
+const average = (values: number[]): number | null => {
+  if (!values.length) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+};
+
+const distance2d = (a: LandmarkPoint, b: LandmarkPoint): number =>
+  Math.hypot(a.x - b.x, a.y - b.y);
+
+const angleAtPointDegrees = (a: LandmarkPoint, b: LandmarkPoint, c: LandmarkPoint): number | null => {
+  const baX = a.x - b.x;
+  const baY = a.y - b.y;
+  const bcX = c.x - b.x;
+  const bcY = c.y - b.y;
+
+  const baNorm = Math.hypot(baX, baY);
+  const bcNorm = Math.hypot(bcX, bcY);
+  if (baNorm <= Number.EPSILON || bcNorm <= Number.EPSILON) {
+    return null;
+  }
+
+  const cosine = Math.max(-1, Math.min(1, (baX * bcX + baY * bcY) / (baNorm * bcNorm)));
+  return (Math.acos(cosine) * 180) / Math.PI;
+};
+
+const quantile = (values: number[], q: number): number => {
+  if (!values.length) return NaN;
+  if (values.length === 1) return values[0];
+  const sorted = [...values].sort((a, b) => a - b);
+  const position = (sorted.length - 1) * q;
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  if (lower === upper) return sorted[lower];
+  const weight = position - lower;
+  return sorted[lower] * (1 - weight) + sorted[upper] * weight;
+};
+
+const readLandmark = readPoseLandmark;
+
+const getConfidence = (points: Array<LandmarkPoint | null>): number | null => {
+  if (points.some((point) => point === null)) {
+    return null;
+  }
+  const visibilityValues = points
+    .map((point) => point?.visibility)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  return average(visibilityValues);
+};
+
+const midpoint = (a: LandmarkPoint, b: LandmarkPoint): LandmarkPoint => ({
+  x: (a.x + b.x) / 2,
+  y: (a.y + b.y) / 2,
+  z: a.z !== null && b.z !== null ? (a.z + b.z) / 2 : null,
+  visibility: average(
+    [a.visibility, b.visibility].filter((value): value is number => typeof value === "number"),
+  ),
+});
+
+const mapMetricValue = (
+  value: number | null,
+  points: Array<LandmarkPoint | null>,
+  keepValueOnLowConfidence = false,
+): MetricSample => {
+  const confidence = getConfidence(points);
+  if (value === null || !Number.isFinite(value)) {
+    return {
+      value: null,
+      confidence,
+      lowConfidence: false,
+    };
+  }
+
+  if (confidence === null || confidence < POSE_CONFIDENCE_THRESHOLD) {
+    return {
+      value: keepValueOnLowConfidence ? value : null,
+      confidence,
+      lowConfidence: true,
+    };
+  }
+
+  return {
+    value,
+    confidence,
+    lowConfidence: false,
+  };
+};
+
+const inferDominantSide = (frames: SlotPoseFrame[]): HandSide => {
+  let leftExtensionTotal = 0;
+  let rightExtensionTotal = 0;
+  let leftCount = 0;
+  let rightCount = 0;
+
+  frames.forEach((frame) => {
+    const leftShoulder = readLandmark(frame, POSE_INDEX.left_shoulder);
+    const rightShoulder = readLandmark(frame, POSE_INDEX.right_shoulder);
+    const leftWrist = readLandmark(frame, POSE_INDEX.left_wrist);
+    const rightWrist = readLandmark(frame, POSE_INDEX.right_wrist);
+    if (!leftShoulder || !rightShoulder || !leftWrist || !rightWrist) {
+      return;
+    }
+
+    const shoulderWidth = distance2d(leftShoulder, rightShoulder);
+    if (shoulderWidth <= Number.EPSILON) {
+      return;
+    }
+
+    const leftConfidence = getConfidence([leftShoulder, leftWrist]);
+    if (leftConfidence !== null && leftConfidence >= POSE_CONFIDENCE_THRESHOLD) {
+      leftExtensionTotal += distance2d(leftWrist, leftShoulder) / shoulderWidth;
+      leftCount += 1;
+    }
+
+    const rightConfidence = getConfidence([rightShoulder, rightWrist]);
+    if (rightConfidence !== null && rightConfidence >= POSE_CONFIDENCE_THRESHOLD) {
+      rightExtensionTotal += distance2d(rightWrist, rightShoulder) / shoulderWidth;
+      rightCount += 1;
+    }
+  });
+
+  const leftAvg = leftCount > 0 ? leftExtensionTotal / leftCount : 0;
+  const rightAvg = rightCount > 0 ? rightExtensionTotal / rightCount : 0;
+  return leftAvg >= rightAvg ? "left" : "right";
+};
+
+const computeFrameMetrics = (
+  currentFrame: SlotPoseFrame,
+  previousFrame: SlotPoseFrame | null,
+  dominantSide: HandSide,
+  poseFps: number,
+): FrameMetricSample => {
+  const metrics = createEmptyFrameMetricSample();
+
+  const leftShoulder = readLandmark(currentFrame, POSE_INDEX.left_shoulder);
+  const rightShoulder = readLandmark(currentFrame, POSE_INDEX.right_shoulder);
+  const leftElbow = readLandmark(currentFrame, POSE_INDEX.left_elbow);
+  const rightElbow = readLandmark(currentFrame, POSE_INDEX.right_elbow);
+  const leftWrist = readLandmark(currentFrame, POSE_INDEX.left_wrist);
+  const rightWrist = readLandmark(currentFrame, POSE_INDEX.right_wrist);
+  const leftHip = readLandmark(currentFrame, POSE_INDEX.left_hip);
+  const rightHip = readLandmark(currentFrame, POSE_INDEX.right_hip);
+  const leftKnee = readLandmark(currentFrame, POSE_INDEX.left_knee);
+  const rightKnee = readLandmark(currentFrame, POSE_INDEX.right_knee);
+  const leftAnkle = readLandmark(currentFrame, POSE_INDEX.left_ankle);
+  const rightAnkle = readLandmark(currentFrame, POSE_INDEX.right_ankle);
+
+  const shoulderWidth =
+    leftShoulder && rightShoulder ? distance2d(leftShoulder, rightShoulder) : null;
+  const shoulderCenter =
+    leftShoulder && rightShoulder ? midpoint(leftShoulder, rightShoulder) : null;
+  const hipCenter = leftHip && rightHip ? midpoint(leftHip, rightHip) : null;
+
+  const visibilityValues = currentFrame.landmarks
+    .map((_, index) => readLandmark(currentFrame, index)?.visibility)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  const trackingQuality = average(visibilityValues);
+  metrics.trackingQuality = mapMetricValue(
+    trackingQuality !== null ? trackingQuality * 100 : null,
+    currentFrame.landmarks.map((_, index) => readLandmark(currentFrame, index)),
+    true,
+  );
+
+  if (shoulderWidth !== null && shoulderWidth > Number.EPSILON) {
+    const stanceWidth =
+      leftAnkle && rightAnkle ? distance2d(leftAnkle, rightAnkle) / shoulderWidth : null;
+    metrics.stanceWidthIndex = mapMetricValue(stanceWidth, [
+      leftAnkle,
+      rightAnkle,
+      leftShoulder,
+      rightShoulder,
+    ]);
+  }
+
+  const weaponShoulder = dominantSide === "left" ? leftShoulder : rightShoulder;
+  const weaponElbow = dominantSide === "left" ? leftElbow : rightElbow;
+  const weaponWrist = dominantSide === "left" ? leftWrist : rightWrist;
+  const leadHip = dominantSide === "left" ? leftHip : rightHip;
+  const rearHip = dominantSide === "left" ? rightHip : leftHip;
+  const leadKnee = dominantSide === "left" ? leftKnee : rightKnee;
+  const rearKnee = dominantSide === "left" ? rightKnee : leftKnee;
+  const leadAnkle = dominantSide === "left" ? leftAnkle : rightAnkle;
+  const rearAnkle = dominantSide === "left" ? rightAnkle : leftAnkle;
+
+  if (shoulderWidth !== null && shoulderWidth > Number.EPSILON) {
+    const armExtension =
+      weaponWrist && weaponShoulder
+        ? distance2d(weaponWrist, weaponShoulder) / shoulderWidth
+        : null;
+    metrics.weaponArmExtension = mapMetricValue(armExtension, [weaponWrist, weaponShoulder]);
+
+    const guardHeight =
+      shoulderCenter && weaponWrist ? (shoulderCenter.y - weaponWrist.y) / shoulderWidth : null;
+    metrics.guardHeight = mapMetricValue(guardHeight, [weaponWrist, leftShoulder, rightShoulder]);
+  }
+
+  if (poseFps > 0 && previousFrame && weaponWrist && shoulderWidth && shoulderWidth > Number.EPSILON) {
+    const previousWeaponWrist = readLandmark(
+      previousFrame,
+      dominantSide === "left" ? POSE_INDEX.left_wrist : POSE_INDEX.right_wrist,
+    );
+    const frameDelta =
+      currentFrame.frame_index > previousFrame.frame_index
+        ? currentFrame.frame_index - previousFrame.frame_index
+        : 1;
+    const handSpeed =
+      previousWeaponWrist
+        ? (distance2d(weaponWrist, previousWeaponWrist) * poseFps) / (frameDelta * shoulderWidth)
+        : null;
+    metrics.handSpeed = mapMetricValue(handSpeed, [weaponWrist, previousWeaponWrist]);
+  }
+
+  const leadKneeAngle =
+    leadHip && leadKnee && leadAnkle ? angleAtPointDegrees(leadHip, leadKnee, leadAnkle) : null;
+  metrics.leadKneeAngle = mapMetricValue(leadKneeAngle, [leadHip, leadKnee, leadAnkle]);
+
+  const rearKneeAngle =
+    rearHip && rearKnee && rearAnkle ? angleAtPointDegrees(rearHip, rearKnee, rearAnkle) : null;
+  metrics.rearKneeAngle = mapMetricValue(rearKneeAngle, [rearHip, rearKnee, rearAnkle]);
+
+  const elbowAngle =
+    weaponShoulder && weaponElbow && weaponWrist
+      ? angleAtPointDegrees(weaponShoulder, weaponElbow, weaponWrist)
+      : null;
+  metrics.weaponArmElbowAngle = mapMetricValue(elbowAngle, [weaponShoulder, weaponElbow, weaponWrist]);
+
+  const torsoLeanAngle = shoulderCenter && hipCenter
+    ? Math.abs((Math.atan2(shoulderCenter.x - hipCenter.x, hipCenter.y - shoulderCenter.y) * 180) / Math.PI)
+    : null;
+  metrics.torsoLeanAngle = mapMetricValue(torsoLeanAngle, [leftShoulder, rightShoulder, leftHip, rightHip]);
+
+  return metrics;
+};
+
+const formatMetricValue = (key: MetricKey, value: number | null): string => {
+  if (value === null || !Number.isFinite(value)) return "N/A";
+  if (key === "trackingQuality") return `${value.toFixed(0)}%`;
+  if (key === "handSpeed") return `${value.toFixed(2)}x/s`;
+  if (key === "leadKneeAngle" || key === "rearKneeAngle" || key === "weaponArmElbowAngle" || key === "torsoLeanAngle") {
+    return `${value.toFixed(0)}deg`;
+  }
+  if (key === "guardHeight") {
+    const sign = value > 0 ? "+" : "";
+    return `${sign}${value.toFixed(2)}x`;
+  }
+  return `${value.toFixed(2)}x`;
+};
+
+const getMetricStatusLabel = (
+  key: MetricKey,
+  value: number | null,
+  baseline: MetricBaseline | undefined,
+): string => {
+  if (value === null || !Number.isFinite(value)) return "N/A";
+  const config = METRIC_CONFIG[key];
+  if (!baseline || !Number.isFinite(baseline.p25) || !Number.isFinite(baseline.p75)) {
+    return config.midLabel;
+  }
+  if (value <= baseline.p25) return config.lowLabel;
+  if (value >= baseline.p75) return config.highLabel;
+  return config.midLabel;
+};
 
 export default function VideoDetail() {
   const params = useParams();
@@ -67,17 +485,34 @@ export default function VideoDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
+  const [reportAction, setReportAction] = useState<"load" | "generate" | null>(null);
   const [reportError, setReportError] = useState<string | null>(null);
   const [replayMode, setReplayMode] = useState<ReplayMode>("original");
   const [skeletonReady, setSkeletonReady] = useState(false);
   const [skeletonLoading, setSkeletonLoading] = useState(false);
   const [skeletonError, setSkeletonError] = useState<string | null>(null);
+  const [playbackTimeSec, setPlaybackTimeSec] = useState(0);
+  const [playbackFrameIndex, setPlaybackFrameIndex] = useState(0);
+  const [selectedAthleteSlot, setSelectedAthleteSlot] = useState<AthleteSlot>("left");
+  const [dominantSideMode, setDominantSideMode] = useState<DominantSideMode>("auto");
+  const [isDominantHintOpen, setIsDominantHintOpen] = useState(false);
+  const dominantHintRef = useRef<HTMLDivElement | null>(null);
+
+  const availableAthleteSlots = useMemo(
+    () => getAvailableAthleteSlots(poseData),
+    [poseData],
+  );
+  const hasDualAthletes = useMemo(
+    () => hasDualAthletePose(poseData),
+    [poseData],
+  );
 
   const fetchVideoData = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
       setReportError(null);
+      setReport(readCachedAnalysisReport<AnalysisReport>(videoId));
 
       // Fetch video metadata
       const videoResponse = await authFetch(`/video/${videoId}`);
@@ -88,28 +523,39 @@ export default function VideoDetail() {
       setVideo(videoData);
 
       // Fetch pose data (if available)
+      let nextPoseData: PoseData | null = null;
       try {
         const poseResponse = await authFetch(`/video/${videoId}/pose-data`);
         if (poseResponse.ok) {
-          const poseData = await poseResponse.json();
-          setPoseData(poseData);
+          nextPoseData = (await poseResponse.json()) as PoseData;
+          setPoseData(nextPoseData);
+          setSelectedAthleteSlot(getDefaultAthleteSlot(nextPoseData));
+        } else {
+          setPoseData(null);
         }
       } catch {
-        // Pose data not available
+        setPoseData(null);
       }
 
       try {
-        const reportResponse = await authFetch(`/video/${videoId}/analysis-report`);
-        if (reportResponse.ok) {
-          const reportData = (await reportResponse.json()) as AnalysisReport;
+        if (nextPoseData) {
+          setReportLoading(true);
+          setReportAction("load");
+          const defaultSlot = getDefaultAthleteSlot(nextPoseData);
+          const reportData = await ensureAnalysisReport<AnalysisReport>(videoId, {
+            athleteSlot: defaultSlot,
+            generateIfMissing: false,
+          });
           setReport(reportData);
-        } else if (reportResponse.status === 404) {
-          setReport(null);
         } else {
-          setReportError("Failed to fetch report");
+          setReport(null);
         }
-      } catch {
+      } catch (err) {
         setReport(null);
+        setReportError(err instanceof Error ? err.message : "Failed to fetch report");
+      } finally {
+        setReportLoading(false);
+        setReportAction(null);
       }
 
     } catch (err) {
@@ -126,6 +572,91 @@ export default function VideoDetail() {
   }, [videoId, fetchVideoData]);
 
   useEffect(() => {
+    if (typeof window === "undefined" || !videoId) {
+      return;
+    }
+
+    const handleStorage = (event: StorageEvent) => {
+      if (!event.key || event.newValue === null) {
+        return;
+      }
+
+      const cacheMeta = parseAnalysisReportCacheKey(event.key);
+      if (!cacheMeta || cacheMeta.videoId !== videoId) {
+        return;
+      }
+      if ((cacheMeta.athleteSlot ?? getDefaultAthleteSlot(poseData)) !== selectedAthleteSlot) {
+        return;
+      }
+
+      try {
+        setReport(JSON.parse(event.newValue) as AnalysisReport);
+      } catch {
+        // Ignore malformed cache payloads.
+      }
+    };
+
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
+  }, [poseData, selectedAthleteSlot, videoId]);
+
+  useEffect(() => {
+    if (!poseData) {
+      return;
+    }
+
+    const fallbackSlot = getDefaultAthleteSlot(poseData);
+    if (availableAthleteSlots.length && !availableAthleteSlots.includes(selectedAthleteSlot)) {
+      setSelectedAthleteSlot(fallbackSlot);
+      return;
+    }
+
+    let cancelled = false;
+
+    const syncSlotReport = async () => {
+      const cachedReport = readCachedAnalysisReport<AnalysisReport>(videoId, selectedAthleteSlot);
+      const cachedSlot = cachedReport ? (cachedReport.athlete_slot ?? fallbackSlot) : null;
+      if (cachedReport && cachedSlot === selectedAthleteSlot) {
+        setReport(cachedReport);
+        setReportLoading(false);
+        setReportAction(null);
+        setReportError(null);
+        return;
+      }
+
+      setReport(cachedReport);
+      setReportLoading(true);
+      setReportAction("load");
+      setReportError(null);
+      try {
+        const nextReport = await ensureAnalysisReport<AnalysisReport>(videoId, {
+          athleteSlot: selectedAthleteSlot,
+          generateIfMissing: false,
+        });
+        if (!cancelled) {
+          setReport(nextReport ?? cachedReport ?? null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setReport(cachedReport ?? null);
+          setReportError(err instanceof Error ? err.message : "Failed to fetch report");
+        }
+      } finally {
+        if (!cancelled) {
+          setReportLoading(false);
+          setReportAction(null);
+        }
+      }
+    };
+
+    void syncSlotReport();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [availableAthleteSlots, poseData, selectedAthleteSlot, videoId]);
+
+  useEffect(() => {
     const initialView = searchParams.get("view");
     if (initialView === "skeleton") {
       setReplayMode("skeleton");
@@ -133,6 +664,31 @@ export default function VideoDetail() {
       setReplayMode("original");
     }
   }, [searchParams]);
+
+  useEffect(() => {
+    const handleGlobalDismiss = (event: MouseEvent | TouchEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (dominantHintRef.current?.contains(target)) return;
+      setIsDominantHintOpen(false);
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsDominantHintOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handleGlobalDismiss);
+    document.addEventListener("touchstart", handleGlobalDismiss);
+    window.addEventListener("keydown", handleEscape);
+
+    return () => {
+      document.removeEventListener("mousedown", handleGlobalDismiss);
+      document.removeEventListener("touchstart", handleGlobalDismiss);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, []);
 
   const ensureSkeletonReplay = useCallback(async () => {
     if (skeletonReady || skeletonLoading) {
@@ -164,27 +720,37 @@ export default function VideoDetail() {
   const generateReport = async () => {
     try {
       setReportLoading(true);
+      setReportAction("generate");
       setReportError(null);
-      const regenerateQuery = report ? "?force_regenerate=true" : "";
-      const response = await authFetch(`/video/${videoId}/analyze/pose/report${regenerateQuery}`, {
-        method: "POST"
+      const job = await startAnalysisReportJob(videoId, {
+        athleteSlot: selectedAthleteSlot,
+        forceRegenerate: Boolean(report),
       });
-      if (!response.ok) {
+      const jobStatus = await waitForAnalysisReportJob<AnalysisReport>(
+        videoId,
+        job.job_id,
+        { pollIntervalMs: 1500, timeoutMs: 240000 },
+      );
+      const data =
+        jobStatus.results.find(
+          (item) => (item.athlete_slot ?? selectedAthleteSlot) === selectedAthleteSlot,
+        ) ?? jobStatus.results[0];
+      if (!data) {
         throw new Error("Failed to generate report");
       }
-      const data: AnalysisReport = await response.json();
       setReport(data);
     } catch (err) {
       setReportError(err instanceof Error ? err.message : "Failed to generate report");
     } finally {
       setReportLoading(false);
+      setReportAction(null);
     }
   };
 
   const getWeaponLabel = (weapon: string) => {
     const labels: Record<string, string> = {
       foil: "Foil",
-      epee: "Épée",
+      epee: "Epee",
       sabre: "Sabre"
     };
     return labels[weapon?.toLowerCase()] || weapon || "Unknown";
@@ -193,7 +759,7 @@ export default function VideoDetail() {
   const getWeaponColor = (weapon: string) => {
     const colors: Record<string, string> = {
       foil: "#FF6B35",
-      epee: "#8B5CF6",
+      epee: "#DC2626",
       sabre: "#06B6D4"
     };
     return colors[weapon?.toLowerCase()] || "#6B7280";
@@ -211,6 +777,158 @@ export default function VideoDetail() {
 
   const originalReplayUrl = buildAuthedApiUrl(`/video/${videoId}/file`);
   const skeletonReplayUrl = buildAuthedApiUrl(`/video/${videoId}/pose-overlay/file`);
+  const poseFrames = useMemo(
+    () => getSlotPoseFrames(poseData, selectedAthleteSlot),
+    [poseData, selectedAthleteSlot],
+  );
+  const selectedAthleteLabel = useMemo(
+    () => getAthleteSlotLabel(selectedAthleteSlot),
+    [selectedAthleteSlot],
+  );
+  const poseFps = poseData?.video_properties?.fps || 0;
+  const inferredDominantSide = useMemo(() => inferDominantSide(poseFrames), [poseFrames]);
+  const activeDominantSide = dominantSideMode === "auto" ? inferredDominantSide : dominantSideMode;
+
+  const currentPoseMatch = useMemo(() => {
+    if (!poseFrames.length) {
+      return null;
+    }
+
+    let left = 0;
+    let right = poseFrames.length - 1;
+
+    while (left <= right) {
+      const mid = Math.floor((left + right) / 2);
+      const midFrameIndex = poseFrames[mid]?.frame_index ?? 0;
+
+      if (midFrameIndex === playbackFrameIndex) {
+        return { frame: poseFrames[mid], index: mid };
+      }
+
+      if (midFrameIndex < playbackFrameIndex) {
+        left = mid + 1;
+      } else {
+        right = mid - 1;
+      }
+    }
+
+    const nextIndex = Math.min(left, poseFrames.length - 1);
+    const prevIndex = Math.max(0, nextIndex - 1);
+    const nextFrame = poseFrames[nextIndex];
+    const prevFrame = poseFrames[prevIndex];
+
+    return Math.abs((nextFrame?.frame_index ?? 0) - playbackFrameIndex) <
+      Math.abs((prevFrame?.frame_index ?? 0) - playbackFrameIndex)
+      ? { frame: nextFrame, index: nextIndex }
+      : { frame: prevFrame, index: prevIndex };
+  }, [playbackFrameIndex, poseFrames]);
+
+  const currentPoseFrame = currentPoseMatch?.frame ?? null;
+  const currentPoseFrameArrayIndex = currentPoseMatch?.index ?? -1;
+
+  const metricTimeline = useMemo<FrameMetricSample[]>(() => {
+    if (!poseFrames.length) return [];
+
+    const rawTimeline = poseFrames.map((frame, index) =>
+      computeFrameMetrics(frame, index > 0 ? poseFrames[index - 1] : null, activeDominantSide, poseFps),
+    );
+
+    const emaTracker = {} as Partial<Record<MetricKey, number | null>>;
+    METRIC_KEYS.forEach((key) => {
+      emaTracker[key] = null;
+    });
+
+    return rawTimeline.map((sample) => {
+      const smoothedSample = createEmptyFrameMetricSample();
+
+      METRIC_KEYS.forEach((key) => {
+        const metric = sample[key];
+        if (typeof metric.value === "number" && Number.isFinite(metric.value)) {
+          const previousEma = emaTracker[key];
+          const nextEma =
+            typeof previousEma === "number"
+              ? METRIC_EMA_ALPHA * metric.value + (1 - METRIC_EMA_ALPHA) * previousEma
+              : metric.value;
+          emaTracker[key] = nextEma;
+          smoothedSample[key] = {
+            ...metric,
+            value: nextEma,
+          };
+        } else {
+          smoothedSample[key] = metric;
+        }
+      });
+
+      return smoothedSample;
+    });
+  }, [activeDominantSide, poseFps, poseFrames]);
+
+  const metricBaselines = useMemo<MetricBaselines>(() => {
+    const baselines: MetricBaselines = {};
+
+    METRIC_KEYS.forEach((key) => {
+      const values = metricTimeline
+        .map((sample) => sample[key].value)
+        .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+
+      if (!values.length) return;
+
+      baselines[key] = {
+        p25: quantile(values, 0.25),
+        p75: quantile(values, 0.75),
+      };
+    });
+
+    return baselines;
+  }, [metricTimeline]);
+
+  const currentMetricCards = useMemo(() => {
+    if (currentPoseFrameArrayIndex < 0 || currentPoseFrameArrayIndex >= metricTimeline.length) {
+      return METRIC_KEYS.map((key) => ({
+        key,
+        ...METRIC_CONFIG[key],
+        value: null as number | null,
+        formattedValue: "N/A",
+        status: "N/A",
+        lowConfidence: false,
+      }));
+    }
+
+    const sample = metricTimeline[currentPoseFrameArrayIndex];
+    return METRIC_KEYS.map((key) => {
+      const metric = sample[key];
+      const formattedValue = formatMetricValue(key, metric.value);
+      const status = metric.lowConfidence
+        ? "Low confidence"
+        : getMetricStatusLabel(key, metric.value, metricBaselines[key]);
+
+      return {
+        key,
+        ...METRIC_CONFIG[key],
+        value: metric.value,
+        formattedValue,
+        status,
+        lowConfidence: metric.lowConfidence,
+      };
+    });
+  }, [currentPoseFrameArrayIndex, metricBaselines, metricTimeline]);
+
+  const currentConfidence = useMemo(() => {
+    if (!currentPoseFrame) return null;
+    const values = currentPoseFrame.landmarks
+      .map((_, index) => readLandmark(currentPoseFrame, index)?.visibility)
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    return average(values);
+  }, [currentPoseFrame]);
+
+  const syncPoseFrameWithPlayback = useCallback((currentTime: number) => {
+    if (!poseFps) {
+      setPlaybackTimeSec(currentTime);
+      return;
+    }
+    setPlaybackTimeSec(currentTime);
+    setPlaybackFrameIndex(Math.max(0, Math.round(currentTime * poseFps)));
+  }, [poseFps]);
 
   if (loading) {
     return (
@@ -315,12 +1033,14 @@ export default function VideoDetail() {
           </div>
 
           <div id="replay" className="mb-6">
-            <div className="mb-4 flex items-center justify-between gap-4">
-              <div>
+            <div className="mb-4 flex flex-wrap items-start justify-between gap-4">
+              <div className="max-w-2xl">
                 <h2 className="text-xl font-semibold">Replay</h2>
-                <p className="text-sm text-muted-foreground">Review the original clip or switch to the skeleton overlay replay.</p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Review the original clip or switch to the skeleton overlay replay.
+                </p>
               </div>
-              <div className="inline-flex rounded-xl border border-border bg-card p-1">
+              <div className="inline-flex rounded-xl border border-border bg-card p-1 shadow-sm">
                 <button
                   type="button"
                   onClick={() => setReplayMode("original")}
@@ -370,77 +1090,231 @@ export default function VideoDetail() {
                     preload="metadata"
                     className="h-full w-full"
                     src={replayMode === "skeleton" ? skeletonReplayUrl : originalReplayUrl}
+                    onLoadedMetadata={(event) => syncPoseFrameWithPlayback(event.currentTarget.currentTime || 0)}
+                    onTimeUpdate={(event) => syncPoseFrameWithPlayback(event.currentTarget.currentTime || 0)}
+                    onSeeked={(event) => syncPoseFrameWithPlayback(event.currentTarget.currentTime || 0)}
                   />
                 )}
               </div>
-              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-4 py-3 text-sm">
-                <p className="text-muted-foreground">
-                  {replayMode === "skeleton"
-                    ? "Skeleton replay overlays detected pose landmarks on top of the original clip."
-                    : "Original replay lets you inspect the source footage before or after comparing the overlay."}
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  <a
-                    href={originalReplayUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="rounded-lg border border-border px-3 py-2 font-medium transition-colors hover:border-primary/40 hover:bg-secondary"
-                  >
-                    Open Original
-                  </a>
-                  <a
-                    href={buildAuthedApiUrl(`/video/${videoId}/pose-overlay/file`)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="rounded-lg bg-secondary px-3 py-2 font-medium transition-colors hover:bg-secondary/80"
-                  >
-                    Open Skeleton
-                  </a>
+            </div>
+
+            {poseData ? (
+              <div className="mt-4 flex justify-center">
+                <div className="w-full max-w-2xl rounded-2xl border border-border bg-card/85 px-4 py-4 shadow-sm">
+                  <div className="flex flex-col items-center gap-3 text-center">
+                    <div className="space-y-1">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-muted-foreground">
+                        Replay Focus
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        {hasDualAthletes
+                          ? "Choose which athlete drives the live data and AI report below."
+                          : "Live data and AI report follow the detected athlete."}
+                      </p>
+                    </div>
+
+                    {hasDualAthletes ? (
+                      <div className="inline-flex rounded-xl border border-border bg-background p-1 shadow-sm">
+                        {availableAthleteSlots.map((slot) => (
+                          <button
+                            key={slot}
+                            type="button"
+                            onClick={() => setSelectedAthleteSlot(slot)}
+                            className={`rounded-lg px-5 py-2 text-sm font-medium transition-colors ${
+                              selectedAthleteSlot === slot
+                                ? "bg-primary text-primary-foreground"
+                                : "text-muted-foreground hover:text-foreground"
+                            }`}
+                          >
+                            {getAthleteSlotLabel(slot)}
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="inline-flex items-center rounded-full border border-border bg-background px-4 py-2 text-sm font-medium text-foreground">
+                        {selectedAthleteLabel}
+                      </div>
+                    )}
+
+                    <p className="text-sm font-medium text-foreground">
+                      Current focus: <span className="text-primary">{selectedAthleteLabel}</span>
+                    </p>
+                  </div>
                 </div>
               </div>
-            </div>
+            ) : null}
           </div>
 
-          {/* Pose Analysis Summary */}
+          {/* Pose Analysis */}
           {poseData && (
             <div className="mb-6">
-              <h2 className="text-xl font-semibold mb-4">Pose Analysis</h2>
-              <div className="p-4 rounded-xl bg-card border border-border">
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-xl font-semibold">Pose Analysis</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Live data below follows the replay focus: {selectedAthleteLabel}.
+                  </p>
+                </div>
+                <p className="text-xs text-muted-foreground">AI analysis is for reference only.</p>
+              </div>
+              <div className="rounded-xl border border-border bg-card p-4">
+                <div className="mb-4 grid grid-cols-2 gap-4 md:grid-cols-6">
                   <div>
-                    <p className="text-sm text-muted-foreground">Frames Processed</p>
+                    <p className="text-sm text-muted-foreground">Playback Time</p>
+                    <p className="text-2xl font-bold">{playbackTimeSec.toFixed(2)}s</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-muted-foreground">Estimated Frame</p>
+                    <p className="text-2xl font-bold">{playbackFrameIndex}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-muted-foreground">Matched Pose Frame</p>
+                    <p className="text-2xl font-bold">{currentPoseFrame?.frame_index ?? "N/A"}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-muted-foreground">Detection Confidence</p>
                     <p className="text-2xl font-bold">
-                      {poseData.video_properties?.frame_count || poseData.pose_sequence?.length || 0}
+                      {currentConfidence !== null ? `${(currentConfidence * 100).toFixed(0)}%` : "N/A"}
                     </p>
                   </div>
                   <div>
-                    <p className="text-sm text-muted-foreground">Video Duration</p>
-                    <p className="text-2xl font-bold">
-                      {poseData.video_properties?.fps
-                        ? `${(poseData.video_properties.frame_count / poseData.video_properties.fps).toFixed(1)}s`
-                        : "N/A"}
+                    <p className="text-sm text-muted-foreground">Pose FPS</p>
+                    <p className="text-2xl font-bold">{poseData.video_properties?.fps || "N/A"}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-muted-foreground">Selected Athlete</p>
+                    <p className="text-2xl font-bold">{getAthleteSlotShortLabel(selectedAthleteSlot)}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {hasDualAthletes ? "Controlled from the replay focus selector" : "Single detected athlete"}
                     </p>
                   </div>
                   <div>
-                    <p className="text-sm text-muted-foreground">Resolution</p>
-                    <p className="text-2xl font-bold">
-                      {poseData.video_properties?.width}x{poseData.video_properties?.height}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-sm text-muted-foreground">FPS</p>
-                    <p className="text-2xl font-bold">
-                      {poseData.video_properties?.fps || "N/A"}
+                    <p className="text-sm text-muted-foreground">Weapon Side</p>
+                    <p className="text-2xl font-bold">{activeDominantSide === "left" ? "Left" : "Right"}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {dominantSideMode === "auto" ? "Auto detected" : "Manual override"}
                     </p>
                   </div>
                 </div>
+
+                <div className="mb-4 rounded-xl border border-border bg-background/60 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <p className="text-sm text-muted-foreground">
+                      Live metrics are normalized by shoulder width and smoothed with a 3-frame EMA.
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <div className="inline-flex rounded-lg border border-border bg-card p-1">
+                        {(["auto", "left", "right"] as const).map((mode) => (
+                          <button
+                            key={mode}
+                            type="button"
+                            onClick={() => setDominantSideMode(mode)}
+                            className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                              dominantSideMode === mode
+                                ? "bg-primary text-primary-foreground"
+                                : "text-muted-foreground hover:text-foreground"
+                            }`}
+                          >
+                            {mode === "auto" ? "Auto" : mode === "left" ? "Left" : "Right"}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div
+                        ref={dominantHintRef}
+                        className="relative"
+                        onMouseEnter={() => setIsDominantHintOpen(true)}
+                        onMouseLeave={() => setIsDominantHintOpen(false)}
+                      >
+                        <button
+                          type="button"
+                          aria-label="Show dominant hand selector help"
+                          aria-haspopup="true"
+                          aria-expanded={isDominantHintOpen}
+                          aria-describedby={isDominantHintOpen ? "dominant-hand-tooltip" : undefined}
+                          onClick={() => setIsDominantHintOpen((open) => !open)}
+                          onFocus={() => setIsDominantHintOpen(true)}
+                          onBlur={(event) => {
+                            const nextTarget = event.relatedTarget;
+                            if (!(nextTarget instanceof Node) || !dominantHintRef.current?.contains(nextTarget)) {
+                              setIsDominantHintOpen(false);
+                            }
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === "Escape") {
+                              setIsDominantHintOpen(false);
+                            }
+                          }}
+                          className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-border/70 text-xs font-semibold text-muted-foreground/80 transition-colors hover:border-border hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                        >
+                          ?
+                        </button>
+                        {isDominantHintOpen ? (
+                          <div
+                            id="dominant-hand-tooltip"
+                            role="tooltip"
+                            className="absolute right-0 top-full z-20 mt-2 w-64 rounded-lg border border-border bg-popover px-3 py-2 text-xs leading-relaxed text-popover-foreground shadow-lg"
+                          >
+                            Dominant hand selector: this controls weapon-side metrics (lead/rear mapping).
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {!currentPoseFrame ? (
+                  <div className="rounded-lg border border-border bg-background px-3 py-4 text-sm text-muted-foreground">
+                    No pose frame matched the current playback time yet.
+                  </div>
+                ) : (
+                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                    {currentMetricCards.map((metric) => (
+                      <article key={metric.key} className="rounded-lg border border-border bg-background px-4 py-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <p className="text-sm font-medium">{metric.label}</p>
+                          <span
+                            className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-medium ${
+                              metric.lowConfidence
+                                ? "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                                : "border-border bg-card text-muted-foreground"
+                            }`}
+                          >
+                            {metric.status}
+                          </span>
+                        </div>
+                        <p className="mt-2 text-2xl font-semibold">{metric.formattedValue}</p>
+                        <p className="mt-1 text-xs text-muted-foreground">{metric.hint}</p>
+                        {metric.lowConfidence ? (
+                          <p className="mt-2 text-xs font-medium text-amber-700 dark:text-amber-300">
+                            Low confidence in this frame.
+                          </p>
+                        ) : null}
+                      </article>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}
 
           {/* AI Analysis Report */}
           <div className="mb-6">
-            <h2 className="text-xl font-semibold mb-4">AI Analysis Report</h2>
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-xl font-semibold">AI Analysis Report</h2>
+                {poseData ? (
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Report target follows the replay focus: {selectedAthleteLabel}. Switching athlete only loads that athlete&apos;s saved report.
+                  </p>
+                ) : null}
+              </div>
+              {poseData ? (
+                <span className="rounded-full border border-border bg-card px-3 py-1 text-xs font-medium text-muted-foreground">
+                  Synced with replay focus
+                </span>
+              ) : null}
+            </div>
 
             {reportError && (
               <div className="mb-4 p-4 rounded-xl bg-red-500/10 border border-red-500/20">
@@ -464,18 +1338,27 @@ export default function VideoDetail() {
                         minute: "2-digit",
                       })}
                     </span>
-                    {reportLoading && <span>Refreshing report...</span>}
+                    {reportLoading && reportAction === "load" && <span>Loading saved report...</span>}
+                    {reportLoading && reportAction === "generate" && <span>Updating report...</span>}
                   </div>
-                  {poseData && !reportLoading && (
-                    <button
-                      onClick={generateReport}
-                      className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
-                    >
-                      Regenerate Report
-                    </button>
-                  )}
                 </div>
                 <ReportMarkdown content={report.report} summary={report.summary} />
+                {poseData ? (
+                  <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
+                    <p className="text-sm text-muted-foreground">
+                      Need a fresh pass for {selectedAthleteLabel}? Generate a new saved report here.
+                    </p>
+                    <button
+                      onClick={generateReport}
+                      disabled={reportLoading}
+                      className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {reportLoading && reportAction === "generate"
+                        ? "Regenerating..."
+                        : `Regenerate ${getAthleteSlotShortLabel(selectedAthleteSlot)} Report`}
+                    </button>
+                  </div>
+                ) : null}
               </div>
             ) : poseData ? (
               <div className="p-4 rounded-xl bg-card border border-border">
@@ -483,19 +1366,21 @@ export default function VideoDetail() {
                   <div className="flex items-center justify-center py-8">
                     <div className="flex flex-col items-center gap-3">
                       <div className="w-6 h-6 border-4 border-primary border-t-transparent rounded-full animate-spin"></div>
-                      <p className="text-muted-foreground text-sm">Generating AI report...</p>
+                      <p className="text-muted-foreground text-sm">
+                        {reportAction === "generate" ? "Generating AI report..." : "Loading saved report..."}
+                      </p>
                     </div>
                   </div>
                 ) : (
                   <div className="text-center py-4">
                     <p className="text-muted-foreground mb-4">
-                      Generate an AI-powered analysis report based on pose data.
+                      No saved report found for {selectedAthleteLabel}. Generate one when you want to save a dedicated report for this athlete.
                     </p>
                     <button
                       onClick={generateReport}
                       className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
                     >
-                      Generate Report
+                      Generate {getAthleteSlotShortLabel(selectedAthleteSlot)} Report
                     </button>
                   </div>
                 )}

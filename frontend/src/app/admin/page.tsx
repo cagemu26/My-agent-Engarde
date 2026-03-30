@@ -4,6 +4,15 @@ import { useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
+import { TopNav } from "@/components/top-nav";
+
+const ADMIN_NAV_LINKS = [
+  { href: "/analyze", label: "Analyze" },
+  { href: "/training", label: "Training" },
+  { href: "/history", label: "History" },
+  { href: "/feedback", label: "Feedback" },
+  { href: "/admin", label: "Admin", adminOnly: true },
+] as const;
 
 export default function AdminPage() {
   const { user, isLoading } = useAuth();
@@ -36,52 +45,29 @@ export default function AdminPage() {
         <div className="absolute inset-0 section-grid opacity-30"></div>
       </div>
 
-      {/* Navigation */}
-      <nav className="fixed top-0 left-0 right-0 z-50 glass border-b border-border/50">
-        <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
-          <Link href="/" className="flex items-center gap-3 group">
-            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-red-600 to-red-700 flex items-center justify-center shadow-lg shadow-red-500/30 group-hover:scale-105 transition-transform duration-300">
-              <span className="text-white font-bold text-lg">E</span>
-            </div>
-            <div>
-              <span className="font-bold text-xl tracking-tight">Engarde</span>
-              <span className="font-bold text-xl text-red-600">AI</span>
-            </div>
-          </Link>
-
-          <div className="hidden md:flex items-center gap-8">
-            <Link href="/" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">
-              Home
-            </Link>
-            <Link href="/analyze" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">
-              Analyze
-            </Link>
-            <Link href="/admin" className="text-sm font-medium text-red-600 hover:text-red-700 transition-colors">
-              Admin
-            </Link>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <span className="text-sm text-muted-foreground">{user.username}</span>
-            {user.is_admin && (
-              <span className="px-2 py-1 text-xs font-medium bg-red-100 text-red-700 rounded-md">Admin</span>
-            )}
-            <Link
-              href="/"
-              className="px-4 py-2 rounded-xl border border-red-200 text-red-600 font-medium hover:bg-red-50 transition-all"
-            >
-              Back to Home
-            </Link>
-          </div>
-        </div>
-      </nav>
+      <TopNav activeHref="/admin" links={[...ADMIN_NAV_LINKS]} />
 
       {/* Main Content */}
       <main className="pt-32 pb-20 relative">
         <div className="max-w-7xl mx-auto px-6">
-          <div className="mb-8">
-            <h1 className="text-3xl font-bold mb-2">Admin Dashboard</h1>
-            <p className="text-muted-foreground">Manage your application</p>
+          <div className="mb-8 flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h1 className="text-3xl font-bold mb-2">Admin Dashboard</h1>
+              <p className="text-muted-foreground">Manage your application</p>
+            </div>
+            <div className="flex items-center gap-2">
+              {user.is_admin && (
+                <span className="rounded-full border border-red-200 bg-red-50 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-red-700">
+                  Admin
+                </span>
+              )}
+              <Link
+                href="/"
+                className="rounded-full border border-border bg-card px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-muted"
+              >
+                Back to Home
+              </Link>
+            </div>
           </div>
 
           <div className="grid md:grid-cols-2 gap-6">

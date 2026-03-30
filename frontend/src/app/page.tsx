@@ -5,17 +5,23 @@ import { BrandLogo } from "@/components/brand-logo";
 import { TopNav } from "@/components/top-nav";
 
 const HOME_NAV_LINKS = [
-  { href: "/analyze", label: "Analyze" },
-  { href: "/training", label: "Training" },
-  { href: "/feedback", label: "Feedback" },
-  { href: "/admin", label: "Admin", adminOnly: true },
+  { href: "#why", label: "Why Engarde AI" },
+  { href: "#workflow", label: "Workflow" },
+  { href: "#weapon-focus", label: "Weapon Focus" },
+  { href: "/demo", label: "Demo" },
 ] as const;
 
-const VALUE_PILLARS = [
+const TRUST_STRIP = [
+  { value: "Pose + Chat", label: "Integrated workflow" },
+  { value: "3 Weapons", label: "Foil, Epee, Sabre" },
+  { value: "Video History", label: "Session tracking" },
+] as const;
+
+const WHY_ITEMS = [
   {
     title: "Frame-by-frame technical review",
     description:
-      "Break down footwork, posture, distance control, and recovery patterns with grounded pose data.",
+      "Break down posture, distance control, and recovery patterns with grounded pose data.",
   },
   {
     title: "Context-aware AI coaching",
@@ -27,12 +33,6 @@ const VALUE_PILLARS = [
     description:
       "Upload footage, revisit past sessions, and keep your coaching conversation tied to the right match.",
   },
-] as const;
-
-const PROOF_STRIP = [
-  { value: "Pose + Chat", label: "Integrated workflow" },
-  { value: "3 Weapons", label: "Foil, Epee, Sabre" },
-  { value: "Video History", label: "Session tracking" },
 ] as const;
 
 const WORKFLOW_STEPS = [
@@ -56,287 +56,253 @@ const WORKFLOW_STEPS = [
 const WEAPON_FOCUS = [
   {
     title: "Foil",
-    tone: "Priority on timing, line, and right-of-way discipline.",
-    accent: "from-orange-500 to-orange-600",
-    surface: "from-orange-50 to-orange-100/60 dark:from-orange-950/30 dark:to-orange-900/10",
-    border: "hover:border-orange-400/50",
-    mark: "F",
+    summary: "Priority on timing, line, and right-of-way discipline.",
   },
   {
     title: "Epee",
-    tone: "Distance management, patience, and whole-body target awareness.",
-    accent: "from-red-600 to-red-700",
-    surface: "from-red-50 to-red-100/60 dark:from-red-950/30 dark:to-red-900/10",
-    border: "hover:border-red-400/50",
-    mark: "E",
+    summary: "Distance management, patience, and full-target decision making.",
   },
   {
     title: "Sabre",
-    tone: "Fast starts, tempo changes, and cleaner attacking decisions.",
-    accent: "from-cyan-500 to-sky-500",
-    surface: "from-cyan-50 to-cyan-100/60 dark:from-cyan-950/30 dark:to-cyan-900/10",
-    border: "hover:border-cyan-400/50",
-    mark: "S",
+    summary: "Fast starts, tempo changes, and cleaner attacking choices.",
   },
 ] as const;
 
-const RECENT_SIGNALS = [
-  "Front knee collapses late in the lunge.",
-  "Recovery footwork is slower than the attack phase.",
-  "Distance control improves after the second exchange.",
+const SNAPSHOT_SIGNALS = [
+  "Front knee stays loaded longer during attacks.",
+  "Recovery phase starts late after touch attempts.",
+  "Distance control is cleaner in the final exchanges.",
+] as const;
+
+const SNAPSHOT_METRICS = [
+  { label: "Tracking Quality", value: "88%" },
+  { label: "Stance Width", value: "1.04x" },
+  { label: "Lead Knee Angle", value: "136deg" },
+  { label: "Weapon-Hand Speed", value: "1.32x/s" },
+] as const;
+
+const SNAPSHOT_CONTEXT = [
+  { label: "Mode", value: "Pose Detection" },
+  { label: "Replay", value: "Original / Skeleton" },
+  { label: "Weapon Side", value: "Auto -> Right" },
 ] as const;
 
 export default function Home() {
   return (
-    <div className="min-h-screen overflow-hidden bg-background">
-      <div className="fixed inset-0 -z-10 overflow-hidden">
-        <div className="absolute left-[8%] top-0 h-[520px] w-[520px] rounded-full bg-red-500/10 blur-[140px]" />
-        <div className="absolute right-[10%] top-[12%] h-[420px] w-[420px] rounded-full bg-amber-400/10 blur-[120px]" />
-        <div className="absolute bottom-0 left-1/2 h-[560px] w-[760px] -translate-x-1/2 rounded-full bg-red-500/5 blur-[160px]" />
-        <div className="absolute inset-0 section-grid opacity-40" />
-        <div className="absolute left-10 top-28 h-24 w-24 rotate-12 rounded-[2rem] border border-red-200/30" />
-        <div className="absolute bottom-28 right-16 h-20 w-20 rounded-full border border-amber-200/30" />
-      </div>
+    <div className="min-h-screen bg-background text-foreground">
+      <TopNav links={[...HOME_NAV_LINKS]} surface="marketing" />
 
-      <TopNav links={[...HOME_NAV_LINKS]} />
-
-      <main className="relative pb-20 pt-28 md:pt-32">
-        <div className="mx-auto max-w-7xl px-6">
-          <section className="grid items-start gap-10 lg:grid-cols-[1.15fr_0.85fr] lg:gap-12">
-            <div className="max-w-3xl">
-              <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-red-200/70 bg-gradient-to-r from-red-50 to-amber-50 px-4 py-2 text-sm font-medium text-red-700 shadow-sm">
-                <span className="h-2 w-2 rounded-full bg-red-500" />
+      <main className="pb-24 pt-28 md:pt-32">
+        <div className="mx-auto max-w-[1180px] px-6">
+          <section className="grid items-start gap-12 lg:grid-cols-[1.05fr_0.95fr] lg:gap-14">
+            <div className="animate-fade-up">
+              <p className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs font-medium tracking-wide text-foreground/85 md:text-[13px]">
+                <span className="h-2 w-2 rounded-full bg-red-600" />
                 Built for fencers who train with intent.
-              </div>
+              </p>
 
-              <h1 className="max-w-4xl text-5xl font-bold leading-[1.02] tracking-tight md:text-7xl md:leading-[0.96]">
+              <h1 className="mt-6 max-w-3xl text-balance text-4xl font-semibold leading-[1.08] tracking-tight sm:text-5xl lg:text-[62px]">
                 Train from footage.
                 <span className="gradient-text block">Compete with clarity.</span>
               </h1>
 
-              <p className="mt-6 max-w-2xl text-lg leading-8 text-foreground/75 md:text-xl">
+              <p className="mt-5 max-w-2xl text-pretty text-base leading-7 text-foreground/80 md:text-lg md:leading-8">
                 Engarde AI turns bout video into technical corrections, tactical review, and drill-ready next steps.
               </p>
 
-              <div className="mt-8 flex flex-col gap-4 sm:flex-row">
+              <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:items-center">
                 <Link
                   href="/analyze"
-                  className="group inline-flex items-center justify-center gap-3 rounded-2xl bg-gradient-to-r from-red-600 to-red-700 px-8 py-4 text-lg font-semibold text-white shadow-xl shadow-red-500/20 transition-all duration-300 hover:-translate-y-1 hover:shadow-2xl hover:shadow-red-500/30"
+                  className="inline-flex min-h-11 items-center justify-center rounded-md bg-red-600 px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-red-700"
                 >
                   Start Analysis
-                  <svg className="h-5 w-5 transition-transform group-hover:translate-x-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
-                  </svg>
                 </Link>
                 <Link
                   href="/demo"
-                  className="inline-flex items-center justify-center gap-3 rounded-2xl border border-red-200 bg-white/70 px-8 py-4 text-lg font-semibold text-red-700 backdrop-blur hover:border-red-400 hover:bg-white"
+                  className="inline-flex min-h-11 items-center justify-center rounded-md border border-border bg-card px-5 py-3 text-sm font-semibold text-foreground transition-colors hover:bg-muted"
                 >
                   View Demo
-                  <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"
-                    />
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
                 </Link>
               </div>
 
-              <div className="mt-10 grid gap-3 sm:grid-cols-3">
-                {PROOF_STRIP.map((item) => (
-                  <div key={item.label} className="glass-card rounded-2xl border border-border/50 p-4">
-                    <p className="text-base font-semibold text-foreground">{item.value}</p>
-                    <p className="mt-1 text-sm text-foreground/75">{item.label}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="relative">
-              <div className="glass-card overflow-hidden rounded-[2rem] border border-white/30 shadow-2xl shadow-red-500/10">
-                <div className="border-b border-border/60 bg-gradient-to-r from-red-600 to-red-700 px-6 py-5 text-white">
-                  <div className="flex items-center justify-between gap-4">
-                    <div>
-                      <p className="text-xs uppercase tracking-[0.24em] text-red-100">Sample Session</p>
-                      <h2 className="mt-2 text-2xl font-bold">Regional Epee Final</h2>
-                    </div>
-                    <div className="rounded-2xl border border-white/20 bg-white/10 px-4 py-3 text-right backdrop-blur">
-                      <p className="text-xs uppercase tracking-wide text-red-100">Status</p>
-                      <p className="mt-1 text-sm font-semibold">Context linked to coach</p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="grid gap-4 p-6">
-                  <div className="grid gap-4 sm:grid-cols-3">
-                    <div className="rounded-2xl bg-secondary/80 p-4">
-                      <p className="text-xs uppercase tracking-wide text-foreground/75">Coverage</p>
-                      <p className="mt-2 text-3xl font-bold text-foreground">82%</p>
-                      <p className="mt-1 text-sm text-foreground/75">Pose frames kept for review</p>
-                    </div>
-                    <div className="rounded-2xl bg-secondary/80 p-4">
-                      <p className="text-xs uppercase tracking-wide text-foreground/75">Lunge Distance</p>
-                      <p className="mt-2 text-3xl font-bold text-foreground">1.84m</p>
-                      <p className="mt-1 text-sm text-foreground/75">Average attack extension</p>
-                    </div>
-                    <div className="rounded-2xl bg-secondary/80 p-4">
-                      <p className="text-xs uppercase tracking-wide text-foreground/75">Recovery Time</p>
-                      <p className="mt-2 text-3xl font-bold text-foreground">0.62s</p>
-                      <p className="mt-1 text-sm text-foreground/75">Back to en garde average</p>
-                    </div>
-                  </div>
-
-                  <div className="rounded-[1.75rem] border border-border/60 bg-card/80 p-5">
-                    <div className="flex items-center justify-between gap-4">
-                      <div>
-                        <p className="text-xs uppercase tracking-wide text-foreground/75">Coach Summary</p>
-                        <h3 className="mt-2 text-xl font-semibold text-foreground">What the system would flag first</h3>
-                      </div>
-                      <span className="rounded-full bg-red-50 px-3 py-1 text-xs font-semibold text-red-700 dark:bg-red-900/30 dark:text-red-200">
-                        Priority Fixes
-                      </span>
-                    </div>
-                    <div className="mt-5 space-y-3">
-                      {RECENT_SIGNALS.map((signal) => (
-                        <div
-                          key={signal}
-                          className="flex items-start gap-3 rounded-2xl border border-border/60 bg-background/70 px-4 py-3"
-                        >
-                          <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-gradient-to-r from-red-500 to-amber-500" />
-                          <p className="text-sm leading-6 text-foreground">{signal}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-4 rounded-2xl border border-red-200/70 bg-white/80 px-4 py-3 shadow-lg backdrop-blur md:max-w-[22rem]">
-                <p className="text-xs uppercase tracking-wide text-foreground/75">Output</p>
-                <p className="mt-1 text-sm font-semibold text-foreground">Video review + drill priorities + chat handoff</p>
-              </div>
-            </div>
-          </section>
-
-          <section className="mt-24">
-            <div className="mb-10 max-w-2xl">
-              <p className="text-sm font-semibold uppercase tracking-[0.24em] text-red-600">Why Engarde AI</p>
-              <h2 className="mt-3 text-3xl font-bold md:text-4xl">Faster review. Clear next actions.</h2>
-              <p className="mt-4 text-lg text-foreground/75">
-                Move from raw footage to coaching decisions with technical clarity and repeatable training priorities.
-              </p>
-            </div>
-
-            <div className="grid gap-6 md:grid-cols-3">
-              {VALUE_PILLARS.map((pillar, index) => (
-                <div key={pillar.title} className="glass-card rounded-[1.75rem] border border-border/60 p-7">
-                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-red-600 to-amber-500 text-lg font-bold text-white">
-                    {index + 1}
-                  </div>
-                  <h3 className="mt-6 text-2xl font-bold">{pillar.title}</h3>
-                  <p className="mt-3 leading-7 text-foreground/75">{pillar.description}</p>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section className="mt-24">
-            <div className="mb-10 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-              <div className="max-w-2xl">
-                <p className="text-sm font-semibold uppercase tracking-[0.24em] text-red-600">Workflow</p>
-                <h2 className="mt-3 text-3xl font-bold md:text-4xl">From raw clip to coaching decision in three moves.</h2>
-              </div>
-              <Link href="/analyze" className="text-sm font-semibold text-red-600 hover:text-red-700">
+              <Link
+                href="/analyze"
+                className="mt-4 inline-flex text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+              >
                 Open Workspace
               </Link>
             </div>
 
-            <div className="grid gap-6 lg:grid-cols-3">
-              {WORKFLOW_STEPS.map((step) => (
-                <div key={step.step} className="relative overflow-hidden rounded-[1.75rem] border border-border/60 bg-card/80 p-7">
-                  <div className="pointer-events-none absolute right-5 top-5 text-5xl font-bold text-red-100 dark:text-red-950/60">{step.step}</div>
-                  <div className="relative pr-12">
-                    <h3 className="text-2xl font-bold">{step.title}</h3>
-                    <p className="mt-4 leading-7 text-foreground/75">{step.description}</p>
-                  </div>
+            <aside className="glass-card animate-fade-up p-5 sm:p-6 md:p-7">
+              <div className="flex items-start justify-between gap-4 border-b border-border pb-4">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Analysis Snapshot</p>
+                  <h2 className="mt-2 text-xl font-semibold tracking-tight md:text-2xl">Regional Epee Final</h2>
+                  <p className="mt-1 text-sm leading-6 text-foreground/75">
+                    A quick look at the same signals available in your workspace replay.
+                  </p>
                 </div>
-              ))}
-            </div>
-          </section>
-
-          <section className="mt-24">
-            <div className="mb-10 text-center">
-              <p className="text-sm font-semibold uppercase tracking-[0.24em] text-red-600">Weapon Focus</p>
-              <h2 className="mt-3 text-3xl font-bold md:text-4xl">Built for how each weapon actually asks questions.</h2>
-            </div>
-
-            <div className="grid gap-6 md:grid-cols-3">
-              {WEAPON_FOCUS.map((weapon) => (
-                <div
-                  key={weapon.title}
-                  className={`group relative overflow-hidden rounded-[1.75rem] border border-transparent p-7 transition-all duration-300 ${weapon.border}`}
-                >
-                  <div className={`absolute inset-0 bg-gradient-to-br ${weapon.surface}`} />
-                  <div className="relative">
-                    <div
-                      className={`flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br ${weapon.accent} text-xl font-bold text-white shadow-lg`}
-                    >
-                      {weapon.mark}
-                    </div>
-                    <h3 className="mt-5 text-2xl font-bold">{weapon.title}</h3>
-                    <p className="mt-3 leading-7 text-foreground/75">{weapon.tone}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section className="relative mt-24 overflow-hidden rounded-[2rem]">
-            <div className="absolute inset-0 bg-gradient-to-r from-red-700 via-red-600 to-amber-500" />
-            <div className="absolute right-0 top-0 h-64 w-64 rounded-full bg-white/10 blur-3xl" />
-            <div className="absolute bottom-0 left-0 h-56 w-56 rounded-full bg-black/10 blur-3xl" />
-
-            <div className="relative flex flex-col gap-8 px-8 py-12 md:px-12 md:py-14 lg:flex-row lg:items-center lg:justify-between">
-              <div className="max-w-2xl">
-                <p className="text-sm font-semibold uppercase tracking-[0.24em] text-red-100">Ready to test it</p>
-                <h2 className="mt-3 text-3xl font-bold text-white md:text-4xl">
-                  Bring one bout. Leave with your next week of work.
-                </h2>
-                <p className="mt-4 text-lg leading-8 text-red-50">
-                  Use the analysis workspace, review an existing clip, or jump into the demo flow if you want to inspect
-                  the experience first.
-                </p>
+                <span className="rounded-full bg-secondary px-2.5 py-1 text-xs font-medium text-secondary-foreground">
+                  Context linked
+                </span>
               </div>
 
-              <div className="flex flex-col gap-4 sm:flex-row">
+              <div className="mt-5 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {SNAPSHOT_CONTEXT.map((item) => (
+                  <div key={item.label} className="rounded-lg border border-border bg-background px-3 py-2.5">
+                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{item.label}</p>
+                    <p className="mt-1 text-sm font-medium leading-5">{item.value}</p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                {SNAPSHOT_METRICS.map(({ label, value }) => (
+                  <div key={label} className="rounded-lg border border-border bg-background p-3.5">
+                    <p className="text-xs text-muted-foreground">{label}</p>
+                    <p className="mt-1 text-xl font-semibold tracking-tight">{value}</p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-5 space-y-2.5">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Coach Notes</p>
+                {SNAPSHOT_SIGNALS.map((signal) => (
+                  <div key={signal} className="flex items-start gap-2 rounded-lg border border-border bg-background px-3 py-2.5 text-sm leading-6 text-foreground/85">
+                    <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-red-600" />
+                    <span>{signal}</span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-5 flex flex-wrap gap-2">
                 <Link
                   href="/analyze"
-                  className="inline-flex items-center justify-center gap-3 rounded-2xl bg-white px-7 py-4 text-base font-semibold text-red-700 shadow-xl transition hover:-translate-y-1"
+                  className="inline-flex items-center rounded-md border border-border bg-background px-3 py-2 text-xs font-semibold text-foreground transition-colors hover:bg-muted"
                 >
-                  Start Analysis
-                  <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
-                  </svg>
+                  Open Workspace
                 </Link>
                 <Link
-                  href="/demo"
-                  className="inline-flex items-center justify-center gap-3 rounded-2xl border border-white/30 bg-white/10 px-7 py-4 text-base font-semibold text-white backdrop-blur transition hover:bg-white/15"
+                  href="/history"
+                  className="inline-flex items-center rounded-md border border-border bg-background px-3 py-2 text-xs font-semibold text-foreground transition-colors hover:bg-muted"
                 >
-                  View Demo
+                  View History
                 </Link>
               </div>
+            </aside>
+          </section>
+
+          <section className="mt-16 animate-fade-up">
+            <div className="grid gap-3 border-y border-border py-6 sm:grid-cols-3">
+              {TRUST_STRIP.map((item) => (
+                <div key={item.label} className="rounded-lg border border-border bg-card px-4 py-3.5">
+                  <p className="text-sm font-semibold tracking-tight">{item.value}</p>
+                  <p className="mt-0.5 text-sm text-muted-foreground">{item.label}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section id="why" className="mt-20 scroll-mt-32 animate-fade-up">
+            <div className="mb-7 max-w-2xl">
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-red-600">Why Engarde AI</p>
+              <h2 className="mt-2 text-balance text-3xl font-semibold tracking-tight md:text-4xl">Faster review. Clear next actions.</h2>
+              <p className="mt-3 max-w-xl text-pretty leading-7 text-foreground/80">
+                Move from raw footage to coaching decisions with technical clarity and repeatable training priorities.
+              </p>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-3">
+              {WHY_ITEMS.map((item) => (
+                <article
+                  key={item.title}
+                  className="rounded-xl border border-border bg-card p-5 transition-transform duration-200 hover:-translate-y-0.5"
+                >
+                  <h3 className="text-lg font-semibold tracking-tight">{item.title}</h3>
+                  <p className="mt-2 text-sm leading-6 text-foreground/80">{item.description}</p>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <section id="workflow" className="mt-20 scroll-mt-32 animate-fade-up">
+            <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-red-600">Workflow</p>
+                <h2 className="mt-2 max-w-2xl text-balance text-3xl font-semibold tracking-tight md:text-4xl">
+                  From raw clip to coaching decision in three moves.
+                </h2>
+              </div>
+              <Link href="/analyze" className="text-sm font-medium text-muted-foreground hover:text-foreground">
+                Open Workspace
+              </Link>
+            </div>
+
+            <div className="grid gap-4 lg:grid-cols-3">
+              {WORKFLOW_STEPS.map((step) => (
+                <article key={step.step} className="rounded-xl border border-border bg-card p-5">
+                  <p className="inline-flex rounded-md bg-secondary px-2 py-1 text-xs font-semibold tracking-wide text-secondary-foreground">
+                    {step.step}
+                  </p>
+                  <h3 className="mt-3 text-lg font-semibold tracking-tight">{step.title}</h3>
+                  <p className="mt-2 text-sm leading-6 text-foreground/80">{step.description}</p>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <section id="weapon-focus" className="mt-20 scroll-mt-32 animate-fade-up">
+            <div className="mb-6 text-center">
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-red-600">Weapon Focus</p>
+              <h2 className="mx-auto mt-2 max-w-2xl text-balance text-3xl font-semibold tracking-tight md:text-4xl">
+                Built for how each weapon asks tactical questions.
+              </h2>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-3">
+              {WEAPON_FOCUS.map((weapon) => (
+                <article key={weapon.title} className="rounded-xl border border-border bg-card p-5 text-center">
+                  <p className="mx-auto inline-flex h-8 w-8 items-center justify-center rounded-md bg-secondary text-sm font-semibold text-secondary-foreground">
+                    {weapon.title.charAt(0)}
+                  </p>
+                  <h3 className="mt-3 text-lg font-semibold tracking-tight">{weapon.title}</h3>
+                  <p className="mt-2 text-sm leading-6 text-foreground/80">{weapon.summary}</p>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <section className="mt-20 animate-fade-up rounded-2xl border border-border bg-card p-8 md:p-10">
+            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-red-600">Ready to test it</p>
+            <h2 className="mt-3 max-w-3xl text-balance text-3xl font-semibold tracking-tight md:text-4xl">
+              Bring one bout. Leave with your next week of work.
+            </h2>
+            <p className="mt-3 max-w-2xl text-pretty leading-7 text-foreground/80">
+              Use the analysis workspace to upload footage, review technical issues, and walk away with a practical training plan.
+            </p>
+
+            <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+              <Link
+                href="/analyze"
+                className="inline-flex items-center justify-center rounded-md bg-red-600 px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-red-700"
+              >
+                Start Analysis
+              </Link>
+              <Link
+                href="/demo"
+                className="inline-flex items-center justify-center rounded-md border border-border px-5 py-3 text-sm font-semibold text-foreground transition-colors hover:bg-muted"
+              >
+                View Demo
+              </Link>
             </div>
           </section>
         </div>
       </main>
 
-      <footer className="border-t border-border bg-muted/30 py-10">
-        <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-5 px-6 text-center md:flex-row md:text-left">
-          <BrandLogo variant="lockup" tone="light" size="sm" withTagline />
-          <p className="text-sm text-foreground/75">© 2026 Engarde AI. Built for practical technical review.</p>
+      <footer className="border-t border-border bg-background py-8">
+        <div className="mx-auto flex max-w-6xl flex-col items-start justify-between gap-4 px-6 md:flex-row md:items-center">
+          <BrandLogo variant="lockup" tone="dark" size="sm" withTagline />
+          <p className="text-sm text-muted-foreground">© 2026 Engarde AI. Built for practical technical review.</p>
         </div>
       </footer>
     </div>

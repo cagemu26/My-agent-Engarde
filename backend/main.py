@@ -81,10 +81,73 @@ def _drop_legacy_training_log_uniqueness() -> None:
             )
 
 
+def _ensure_chat_session_schema() -> None:
+    with engine.begin() as connection:
+        if engine.dialect.name == "postgresql":
+            connection.execute(
+                text("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS session_type VARCHAR(32)")
+            )
+            connection.execute(
+                text(
+                    "UPDATE chat_sessions "
+                    "SET session_type = 'chat_qa' "
+                    "WHERE session_type IS NULL OR session_type = ''"
+                )
+            )
+            connection.execute(
+                text("ALTER TABLE chat_sessions ALTER COLUMN session_type SET DEFAULT 'chat_qa'")
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_chat_sessions_user_type_updated "
+                    "ON chat_sessions (user_id, session_type, updated_at)"
+                )
+            )
+            return
+
+        if engine.dialect.name == "sqlite":
+            columns = connection.execute(text("PRAGMA table_info(chat_sessions)")).fetchall()
+            column_names = {row[1] for row in columns}
+            if "session_type" not in column_names:
+                connection.execute(
+                    text("ALTER TABLE chat_sessions ADD COLUMN session_type VARCHAR(32) DEFAULT 'chat_qa'")
+                )
+            connection.execute(
+                text(
+                    "UPDATE chat_sessions "
+                    "SET session_type = 'chat_qa' "
+                    "WHERE session_type IS NULL OR session_type = ''"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_chat_sessions_user_type_updated "
+                    "ON chat_sessions (user_id, session_type, updated_at)"
+                )
+            )
+            return
+
+        # Generic fallback for other SQL engines.
+        try:
+            connection.execute(
+                text("ALTER TABLE chat_sessions ADD COLUMN session_type VARCHAR(32)")
+            )
+        except Exception:
+            pass
+        connection.execute(
+            text(
+                "UPDATE chat_sessions "
+                "SET session_type = 'chat_qa' "
+                "WHERE session_type IS NULL OR session_type = ''"
+            )
+        )
+
+
 @app.on_event("startup")
 def ensure_database_tables():
     Base.metadata.create_all(bind=engine)
     _drop_legacy_training_log_uniqueness()
+    _ensure_chat_session_schema()
 
 
 @app.get("/")

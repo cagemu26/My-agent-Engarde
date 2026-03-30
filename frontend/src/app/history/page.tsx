@@ -1,12 +1,23 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { clearCachedAnalysisReports } from "@/lib/analysis-report";
 import { authFetch } from "@/lib/api";
+import {
+  SESSION_META,
+  SESSION_TYPE_CHAT,
+  SESSION_TYPE_TRAINING,
+  SESSION_TYPE_VIDEO,
+  type SessionType,
+  normalizeSessionType,
+} from "@/lib/chat-session";
 import { TopNav } from "@/components/top-nav";
 
 const HISTORY_NAV_LINKS = [
   { href: "/analyze", label: "Analyze" },
+  { href: "/history", label: "History" },
   { href: "/training", label: "Training" },
   { href: "/feedback", label: "Feedback" },
   { href: "/admin", label: "Admin", adminOnly: true },
@@ -24,228 +35,405 @@ interface VideoMetadata {
   upload_time: string;
 }
 
+interface ChatSessionRecord {
+  id: string;
+  video_id?: string | null;
+  session_type?: SessionType;
+  title?: string | null;
+  context_summary?: string | null;
+  created_at: string;
+  updated_at: string;
+  last_message_at?: string | null;
+  message_count: number;
+}
+
+interface ChatSessionDeleteResponse {
+  deleted_scope: "session_only" | "video_full";
+  deleted_session_count: number;
+  deleted_message_count: number;
+  video_id?: string | null;
+  message: string;
+}
+
+const SESSION_ORDER: SessionType[] = [
+  SESSION_TYPE_VIDEO,
+  SESSION_TYPE_TRAINING,
+  SESSION_TYPE_CHAT,
+];
+
+const getWeaponLabel = (weapon: string) => {
+  const labels: Record<string, string> = {
+    foil: "Foil",
+    epee: "Epee",
+    sabre: "Sabre",
+  };
+  return labels[weapon?.toLowerCase()] || weapon || "Unknown";
+};
+
+const formatRelativeTime = (dateString?: string | null) => {
+  if (!dateString) return "Unknown";
+  const date = new Date(dateString);
+  if (Number.isNaN(date.getTime())) return "Unknown";
+
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+  const diffDays = Math.floor(diffHours / 24);
+
+  if (diffHours < 1) return "Just now";
+  if (diffHours < 24) return `${diffHours} hour${diffHours > 1 ? "s" : ""} ago`;
+  if (diffDays === 1) return "Yesterday";
+  if (diffDays < 7) return `${diffDays} days ago`;
+  if (diffDays < 30) return `${Math.floor(diffDays / 7)} week${Math.floor(diffDays / 7) > 1 ? "s" : ""} ago`;
+  return date.toLocaleDateString();
+};
+
+const getSessionTimestamp = (session: ChatSessionRecord) => {
+  const value = session.last_message_at || session.updated_at || session.created_at;
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+};
+
+const parseApiError = async (response: Response, fallback: string): Promise<string> => {
+  try {
+    const data = (await response.json()) as { detail?: string; message?: string; error?: string };
+    return data.detail || data.message || data.error || fallback;
+  } catch {
+    return fallback;
+  }
+};
+
 export default function History() {
+  const router = useRouter();
   const [videos, setVideos] = useState<VideoMetadata[]>([]);
+  const [sessions, setSessions] = useState<ChatSessionRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [creatingSession, setCreatingSession] = useState(false);
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchVideos = useCallback(async () => {
+  const fetchHistoryData = useCallback(async () => {
     try {
       setLoading(true);
-      const response = await authFetch("/video/list");
-      if (!response.ok) {
+      const [videosResponse, sessionsResponse] = await Promise.all([
+        authFetch("/video/list"),
+        authFetch("/chat/sessions?limit=100"),
+      ]);
+      if (!videosResponse.ok) {
         throw new Error("Failed to fetch videos");
       }
-      const data = await response.json();
-      setVideos(data.videos || []);
+      if (!sessionsResponse.ok) {
+        throw new Error("Failed to fetch chat sessions");
+      }
+
+      const videosData = await videosResponse.json();
+      const sessionsData = await sessionsResponse.json();
+      setVideos(videosData.videos || []);
+      setSessions((sessionsData.sessions || []) as ChatSessionRecord[]);
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load videos");
+      setError(err instanceof Error ? err.message : "Failed to load history data");
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    fetchVideos();
-  }, [fetchVideos]);
+    fetchHistoryData();
+  }, [fetchHistoryData]);
 
-  const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
-    const diffDays = Math.floor(diffHours / 24);
+  const videoById = useMemo(() => {
+    const map = new Map<string, VideoMetadata>();
+    for (const video of videos) {
+      map.set(video.video_id, video);
+    }
+    return map;
+  }, [videos]);
 
-    if (diffHours < 1) return "Just now";
-    if (diffHours < 24) return `${diffHours} hour${diffHours > 1 ? 's' : ''} ago`;
-    if (diffDays === 1) return "Yesterday";
-    if (diffDays < 7) return `${diffDays} days ago`;
-    if (diffDays < 30) return `${Math.floor(diffDays / 7)} week${Math.floor(diffDays / 7) > 1 ? 's' : ''} ago`;
-    return date.toLocaleDateString();
-  };
-
-  const getWeaponLabel = (weapon: string) => {
-    const labels: Record<string, string> = {
-      foil: "Foil",
-      epee: "Épée",
-      sabre: "Sabre"
+  const groupedSessions = useMemo(() => {
+    const sorted = [...sessions].sort((a, b) => getSessionTimestamp(b) - getSessionTimestamp(a));
+    const groups: Record<SessionType, ChatSessionRecord[]> = {
+      [SESSION_TYPE_VIDEO]: [],
+      [SESSION_TYPE_TRAINING]: [],
+      [SESSION_TYPE_CHAT]: [],
     };
-    return labels[weapon?.toLowerCase()] || weapon;
-  };
 
-  const getWeaponColor = (weapon: string) => {
-    const colors: Record<string, string> = {
-      foil: "#F97316",
-      epee: "#DC2626",
-      sabre: "#06B6D4"
-    };
-    return colors[weapon?.toLowerCase()] || "#6B7280";
-  };
+    for (const session of sorted) {
+      const type = normalizeSessionType(session.session_type);
+      groups[type].push(session);
+    }
+
+    return groups;
+  }, [sessions]);
+
+  const totalSessions = sessions.length;
+
+  const handleCreateNewSession = useCallback(async () => {
+    try {
+      setCreatingSession(true);
+      const response = await authFetch("/chat/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_type: SESSION_TYPE_CHAT,
+          force_new: true,
+          title: `Chat ${new Date().toLocaleDateString()}`,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to create session");
+      }
+      const data = (await response.json()) as ChatSessionRecord;
+      if (!data.id) {
+        throw new Error("Invalid session response");
+      }
+      router.push(`/analyze?chat_session=${encodeURIComponent(data.id)}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create new session");
+    } finally {
+      setCreatingSession(false);
+    }
+  }, [router]);
+
+  const handleDeleteSession = useCallback(
+    async (session: ChatSessionRecord) => {
+      if (!session.id || deletingSessionId === session.id) return;
+
+      const normalizedType = normalizeSessionType(session.session_type);
+      const isVideoSession = normalizedType === SESSION_TYPE_VIDEO && Boolean(session.video_id);
+      const confirmMessage = isVideoSession
+        ? "Delete this video session?\n\nThis will permanently delete all related video-analysis sessions, messages, video assets, and reports for this video. This action cannot be undone."
+        : "Delete this session and all its messages? This action cannot be undone.";
+
+      if (!window.confirm(confirmMessage)) {
+        return;
+      }
+
+      setDeletingSessionId(session.id);
+      try {
+        const response = await authFetch(`/chat/sessions/${encodeURIComponent(session.id)}`, {
+          method: "DELETE",
+        });
+        if (!response.ok) {
+          throw new Error(await parseApiError(response, "Failed to delete session"));
+        }
+
+        const deleted = (await response.json()) as ChatSessionDeleteResponse;
+        const deletedVideoId = deleted.video_id || null;
+
+        if (deletedVideoId && typeof window !== "undefined") {
+          clearCachedAnalysisReports(deletedVideoId);
+          window.localStorage.removeItem(`video_qa_session:${deletedVideoId}`);
+        }
+
+        if (deleted.deleted_scope === "video_full" && deletedVideoId) {
+          setSessions((prev) =>
+            prev.filter(
+              (item) =>
+                !(
+                  normalizeSessionType(item.session_type) === SESSION_TYPE_VIDEO &&
+                  item.video_id === deletedVideoId
+                ),
+            ),
+          );
+          setVideos((prev) => prev.filter((video) => video.video_id !== deletedVideoId));
+        } else {
+          setSessions((prev) => prev.filter((item) => item.id !== session.id));
+        }
+        setError(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to delete session");
+      } finally {
+        setDeletingSessionId(null);
+      }
+    },
+    [deletingSessionId],
+  );
 
   return (
-    <div className="min-h-screen bg-background overflow-hidden">
-      {/* Background Effects */}
-      <div className="fixed inset-0 -z-10 overflow-hidden">
-        <div className="absolute top-0 left-1/4 w-[500px] h-[500px] bg-red-500/5 rounded-full blur-[100px]"></div>
-        <div className="absolute bottom-0 right-1/4 w-[400px] h-[400px] bg-amber-500/5 rounded-full blur-[80px]"></div>
-      </div>
-
+    <div className="min-h-screen bg-background">
       <TopNav activeHref="/history" links={[...HISTORY_NAV_LINKS]} />
 
       <main className="pt-32 pb-16">
-        <div className="max-w-6xl mx-auto px-6">
-          {/* Header */}
-          <div className="flex items-center justify-between mb-10">
+        <div className="mx-auto max-w-6xl px-6">
+          <div className="mb-10 flex items-center justify-between gap-4">
             <div>
-              <h1 className="text-4xl font-bold mb-2">Analysis History</h1>
-              <p className="text-muted-foreground">Review your past performances</p>
+              <h1 className="text-4xl font-bold">Session History</h1>
+              <p className="mt-2 text-muted-foreground">
+                Multi-thread AI sessions grouped by source type.
+              </p>
             </div>
-            <div className="text-right">
-              <p className="text-sm text-muted-foreground">Total Videos</p>
-              <p className="text-4xl font-bold gradient-text">{videos.length}</p>
+            <div className="flex items-center gap-3">
+              <div className="text-right">
+                <p className="text-sm text-muted-foreground">Threads</p>
+                <p className="text-4xl font-bold text-foreground">{totalSessions}</p>
+              </div>
+              <button
+                type="button"
+                onClick={handleCreateNewSession}
+                disabled={creatingSession}
+                className="rounded-xl bg-red-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {creatingSession ? "Creating..." : "New Session"}
+              </button>
             </div>
           </div>
 
-          <div className="mb-8 rounded-2xl border border-amber-200 bg-amber-50/70 p-4 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
-            History is now integrated into <Link href="/analyze" className="font-semibold underline underline-offset-2">Analyze</Link> as a collapsible sidebar for faster browsing.
+          <div className="mb-8 rounded-2xl border border-border bg-card p-4 text-sm text-foreground/85">
+            History is grouped into three sources: Video Analysis, Training Analysis, and Chat Q&A.
           </div>
 
-          {/* Loading State */}
           {loading && (
             <div className="flex items-center justify-center py-20">
               <div className="flex flex-col items-center gap-4">
-                <div className="w-12 h-12 border-4 border-red-500 border-t-transparent rounded-full animate-spin"></div>
-                <p className="text-muted-foreground">Loading videos...</p>
+                <div className="h-12 w-12 animate-spin rounded-full border-4 border-red-500 border-t-transparent" />
+                <p className="text-muted-foreground">Loading history...</p>
               </div>
             </div>
           )}
 
-          {/* Error State */}
           {error && (
-            <div className="mb-6 p-5 rounded-2xl bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
+            <div className="mb-6 rounded-2xl border border-red-200 bg-red-50 p-5 dark:border-red-800 dark:bg-red-900/20">
               <p className="text-red-600 dark:text-red-400">{error}</p>
               <button
-                onClick={fetchVideos}
-                className="mt-3 text-sm text-red-600 hover:underline font-medium"
+                type="button"
+                onClick={fetchHistoryData}
+                className="mt-3 text-sm font-medium text-red-600 hover:underline"
               >
                 Try again
               </button>
             </div>
           )}
 
-          {/* Empty State */}
-          {!loading && !error && videos.length === 0 && (
-            <div className="text-center py-20 glass-card rounded-3xl">
-              <div className="w-20 h-20 mx-auto mb-6 rounded-2xl bg-red-100 dark:bg-red-900/30 flex items-center justify-center">
-                <svg className="w-10 h-10 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+          {!loading && !error && totalSessions === 0 && (
+            <div className="glass-card py-20 text-center">
+              <div className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-2xl bg-secondary">
+                <svg className="h-10 w-10 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M8 10h.01M12 10h.01M16 10h.01M9 16h6M12 3C7.03 3 3 6.58 3 11c0 2.2 1 4.19 2.62 5.63L5 21l4.58-2.29c.76.19 1.58.29 2.42.29 4.97 0 9-3.58 9-8s-4.03-8-9-8z"
+                  />
                 </svg>
               </div>
-              <h3 className="text-xl font-bold mb-2">No videos yet</h3>
-              <p className="text-muted-foreground mb-6 max-w-sm mx-auto">
-                Upload your first fencing video to start analyzing your technique
+              <h3 className="text-xl font-bold">No sessions yet</h3>
+              <p className="mx-auto mt-2 max-w-sm text-muted-foreground">
+                Start a new chat thread or analyze a training/video context to populate history.
               </p>
-              <Link
-                href="/analyze"
-                className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-gradient-to-r from-red-600 to-red-700 text-white font-medium hover:shadow-lg hover:shadow-red-500/30 hover-lift transition-all"
-              >
-                Upload Video
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
-                </svg>
-              </Link>
+              <div className="mt-6 flex items-center justify-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleCreateNewSession}
+                  className="rounded-xl bg-red-600 px-6 py-3 font-medium text-white transition-colors hover:bg-red-700"
+                >
+                  New Chat Session
+                </button>
+                <Link
+                  href="/analyze"
+                  className="rounded-xl border border-border px-6 py-3 font-medium transition-colors hover:border-red-300"
+                >
+                  Open Analyze
+                </Link>
+              </div>
             </div>
           )}
 
-          {/* Filters */}
-          {!loading && !error && videos.length > 0 && (
-            <>
-              {/* History List */}
-              <div className="space-y-4">
-                {videos.map((video) => (
-                  <div
-                    key={video.video_id}
-                    className="glass-card rounded-2xl p-5 transition-all duration-300 hover-lift"
-                  >
-                    <div className="flex items-center justify-between gap-4">
-                      <Link
-                        href={`/history/${video.video_id}`}
-                        className="group flex min-w-0 flex-1 items-center justify-between gap-4"
-                      >
-                        <div className="flex min-w-0 items-center gap-5">
+          {!loading && !error && totalSessions > 0 && (
+            <div className="space-y-8">
+              {SESSION_ORDER.map((type) => {
+                const items = groupedSessions[type];
+                if (!items.length) return null;
+
+                const meta = SESSION_META[type];
+                return (
+                  <section key={type}>
+                    <div className="mb-3 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className={`h-2.5 w-2.5 rounded-full ${meta.dotClass}`} />
+                        <h2 className="text-lg font-semibold">{meta.label}</h2>
+                      </div>
+                      <span className="text-xs text-muted-foreground">{items.length} sessions</span>
+                    </div>
+
+                    <div className="space-y-3">
+                      {items.map((session) => {
+                        const linkedVideo = session.video_id ? videoById.get(session.video_id) : null;
+                        const title =
+                          linkedVideo?.title ||
+                          session.title ||
+                          (type === SESSION_TYPE_VIDEO
+                            ? "Video Analysis Session"
+                            : type === SESSION_TYPE_TRAINING
+                              ? "Training Analysis Session"
+                              : "Chat Session");
+
+                        const summary =
+                          type === SESSION_TYPE_VIDEO
+                            ? [
+                                linkedVideo?.weapon ? getWeaponLabel(linkedVideo.weapon) : "",
+                                linkedVideo?.tournament || "",
+                                linkedVideo?.score || "",
+                              ]
+                                .filter(Boolean)
+                                .join(" • ") || "Video context session"
+                            : session.context_summary?.replace(/\s+/g, " ").trim() || "No summary yet.";
+
+                        return (
                           <div
-                            className="flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl shadow-lg"
-                            style={{ backgroundColor: `${getWeaponColor(video.weapon)}20` }}
+                            key={session.id}
+                            className="glass-card rounded-2xl border border-border p-4"
                           >
-                            <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke={getWeaponColor(video.weapon)} strokeWidth={2}>
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                            </svg>
-                          </div>
-                          <div className="min-w-0">
-                            <h3 className="truncate text-lg font-semibold transition-colors group-hover:text-red-600">{video.title || "Untitled Video"}</h3>
-                            <div className="mt-1 flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
-                              <span
-                                className="px-2.5 py-0.5 rounded-full text-xs font-medium"
-                                style={{
-                                  backgroundColor: `${getWeaponColor(video.weapon)}20`,
-                                  color: getWeaponColor(video.weapon)
-                                }}
-                              >
-                                {getWeaponLabel(video.weapon)}
-                              </span>
-                              {video.tournament && (
-                                <>
-                                  <span>•</span>
-                                  <span>{video.tournament}</span>
-                                </>
-                              )}
-                              <span>•</span>
-                              <span>{formatDate(video.upload_time)}</span>
+                            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${meta.badgeClass}`}>
+                                    {meta.label}
+                                  </span>
+                                  <span className="text-xs text-muted-foreground">
+                                    Updated {formatRelativeTime(session.last_message_at || session.updated_at)}
+                                  </span>
+                                </div>
+                                <h3 className="mt-2 truncate text-base font-semibold text-foreground">{title}</h3>
+                                <p className="mt-1 truncate text-sm text-muted-foreground">{summary}</p>
+                                <p className="mt-1 text-xs text-muted-foreground">
+                                  {session.message_count} messages
+                                </p>
+                              </div>
+
+                              <div className="flex shrink-0 flex-wrap gap-2">
+                                <Link
+                                  href={`/analyze?chat_session=${encodeURIComponent(session.id)}`}
+                                  className="rounded-xl bg-red-600 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-700"
+                                >
+                                  Continue Chat
+                                </Link>
+                                {session.video_id && (
+                                  <Link
+                                    href={`/history/${session.video_id}`}
+                                    className="rounded-xl border border-border px-3 py-2 text-sm font-semibold transition-colors hover:border-red-300"
+                                  >
+                                    Open Video
+                                  </Link>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => void handleDeleteSession(session)}
+                                  disabled={deletingSessionId === session.id}
+                                  className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-600 transition-colors hover:border-red-300 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-800 dark:bg-red-900/30 dark:text-red-300"
+                                >
+                                  {deletingSessionId === session.id ? "Deleting..." : "Delete"}
+                                </button>
+                              </div>
                             </div>
                           </div>
-                        </div>
-                        <div className="flex shrink-0 items-center gap-4">
-                          {video.match_result && (
-                            <span className={`px-3 py-1.5 rounded-full text-xs font-semibold ${
-                              video.match_result === "win"
-                                ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-                                : video.match_result === "loss"
-                                ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
-                                : "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400"
-                            }`}>
-                              {video.match_result === "win" ? "Win" : video.match_result === "loss" ? "Loss" : "Draw"}
-                            </span>
-                          )}
-                          {video.score && (
-                            <p className="text-sm font-mono font-semibold text-muted-foreground">
-                              {video.score}
-                            </p>
-                          )}
-                          <svg className="w-5 h-5 text-muted-foreground group-hover:translate-x-1 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                          </svg>
-                        </div>
-                      </Link>
-                      <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
-                        <Link
-                          href={`/history/${video.video_id}?view=replay`}
-                          className="rounded-xl border border-border px-3 py-2 text-center text-sm font-medium text-foreground transition-colors hover:border-primary/40 hover:bg-secondary"
-                        >
-                          Replay
-                        </Link>
-                        <Link
-                          href={`/history/${video.video_id}?view=skeleton`}
-                          className="rounded-xl bg-gradient-to-r from-red-600 to-red-700 px-3 py-2 text-center text-sm font-medium text-white transition-all hover:shadow-lg hover:shadow-red-500/30"
-                        >
-                          Skeleton Replay
-                        </Link>
-                      </div>
+                        );
+                      })}
                     </div>
-                  </div>
-                ))}
-              </div>
-            </>
+                  </section>
+                );
+              })}
+            </div>
           )}
         </div>
       </main>

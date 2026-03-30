@@ -1,30 +1,42 @@
+import asyncio
+import logging
 import mimetypes
+import json
+from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, status
+from uuid import UUID
+
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, status, BackgroundTasks
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from app.schemas import (
+    AthleteSlot,
     VideoUploadResponse,
     VideoAnalyzeRequest,
     VideoAnalyzeResponse,
     VideoListResponse,
     PoseAnalyzeRequest,
     PoseAnalyzeResponse,
+    PoseAnalysisJobCreateResponse,
+    PoseAnalysisJobStatusResponse,
     PoseOverlayResponse,
     AnalysisReportResponse,
     AnalysisReportGenerateResponse,
+    AnalysisReportJobCreateResponse,
+    AnalysisReportJobStatusResponse,
 )
 from app.services.video import video_service
 from app.services.pose_analysis import pose_analysis_service
 from app.services.analysis_report import analysis_report_service
-from app.core.database import get_db
+from app.core.database import get_db, SessionLocal
 from app.core.auth import verify_token
-from app.models import User
+from app.models import User, AnalysisReportJob, PoseAnalysisJob
 
 
 router = APIRouter(tags=["video"])
 security_optional = HTTPBearer(auto_error=False)
+logger = logging.getLogger(__name__)
 
 
 ALLOWED_VIDEO_TYPES = {
@@ -41,6 +53,14 @@ ALLOWED_VIDEO_EXTENSIONS = {
 }
 
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
+REPORT_JOB_STATUS_PENDING = "pending"
+REPORT_JOB_STATUS_RUNNING = "running"
+REPORT_JOB_STATUS_COMPLETED = "completed"
+REPORT_JOB_STATUS_FAILED = "failed"
+POSE_JOB_STATUS_PENDING = "pending"
+POSE_JOB_STATUS_RUNNING = "running"
+POSE_JOB_STATUS_COMPLETED = "completed"
+POSE_JOB_STATUS_FAILED = "failed"
 
 
 def get_current_user_optional(
@@ -104,6 +124,228 @@ def is_allowed_video_upload(file: UploadFile) -> bool:
     extension = (file.filename or "").lower()
     extension = extension[extension.rfind("."):] if "." in extension else ""
     return file.content_type in ALLOWED_VIDEO_TYPES or extension in ALLOWED_VIDEO_EXTENSIONS
+
+
+def _parse_job_uuid(job_id: str) -> UUID:
+    try:
+        return UUID(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid report job id") from exc
+
+
+def _normalize_requested_slot(slot: Optional[AthleteSlot]) -> Optional[str]:
+    if slot is None:
+        return None
+    return slot.value
+
+
+def _serialize_report_job(
+    job: AnalysisReportJob,
+    results: list[AnalysisReportGenerateResponse],
+) -> AnalysisReportJobStatusResponse:
+    athlete_slot = None
+    if job.requested_slot in {"left", "right"}:
+        athlete_slot = AthleteSlot(job.requested_slot)
+    return AnalysisReportJobStatusResponse(
+        job_id=str(job.id),
+        video_id=job.video_id,
+        athlete_slot=athlete_slot,
+        status=job.status,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+        error=job.error_message,
+        results=results,
+    )
+
+
+def _decode_job_results(job: AnalysisReportJob) -> list[AnalysisReportGenerateResponse]:
+    if not job.result_json:
+        return []
+    try:
+        parsed = json.loads(job.result_json)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    results: list[AnalysisReportGenerateResponse] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        try:
+            results.append(AnalysisReportGenerateResponse(**item))
+        except Exception:
+            continue
+    return results
+
+
+def _serialize_pose_job(
+    job: PoseAnalysisJob,
+    result: Optional[PoseAnalyzeResponse],
+) -> PoseAnalysisJobStatusResponse:
+    return PoseAnalysisJobStatusResponse(
+        job_id=str(job.id),
+        video_id=job.video_id,
+        status=job.status,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+        error=job.error_message,
+        result=result,
+    )
+
+
+def _decode_pose_job_result(job: PoseAnalysisJob) -> Optional[PoseAnalyzeResponse]:
+    if not job.result_json:
+        return None
+    try:
+        parsed = json.loads(job.result_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    try:
+        return PoseAnalyzeResponse(**parsed)
+    except Exception:
+        return None
+
+
+async def _run_pose_job(job_id: str) -> None:
+    db = SessionLocal()
+    try:
+        parsed_job_id = UUID(job_id)
+    except ValueError:
+        db.close()
+        return
+
+    try:
+        job = (
+            db.query(PoseAnalysisJob)
+            .filter(PoseAnalysisJob.id == parsed_job_id)
+            .first()
+        )
+        if job is None:
+            return
+
+        if job.status in {POSE_JOB_STATUS_RUNNING, POSE_JOB_STATUS_COMPLETED}:
+            return
+
+        job.status = POSE_JOB_STATUS_RUNNING
+        job.started_at = datetime.utcnow()
+        job.error_message = None
+        db.commit()
+        db.refresh(job)
+
+        logger.info("pose_job_started job_id=%s video_id=%s", str(job.id), job.video_id)
+
+        video_path = video_service.get_video_path(job.video_id)
+        if not video_path:
+            raise ValueError("Video not found. Please upload the video first.")
+
+        result = await asyncio.to_thread(
+            pose_analysis_service.analyze_pose,
+            video_path,
+            job.video_id,
+        )
+
+        payload = PoseAnalyzeResponse(
+            video_id=job.video_id,
+            message="Pose analysis completed successfully",
+            pose_data_path=result["pose_data_path"],
+            processed_frames=result["processing"]["processed_frames"],
+            total_frames=result["processing"]["total_frames"],
+        )
+        job.result_json = json.dumps(payload.model_dump(), ensure_ascii=False, default=str)
+        job.status = POSE_JOB_STATUS_COMPLETED
+        job.completed_at = datetime.utcnow()
+        job.error_message = None
+        db.commit()
+        logger.info("pose_job_completed job_id=%s video_id=%s", str(job.id), job.video_id)
+    except Exception as exc:
+        logger.exception("pose_job_failed job_id=%s error=%s", job_id, str(exc))
+        job = (
+            db.query(PoseAnalysisJob)
+            .filter(PoseAnalysisJob.id == parsed_job_id)
+            .first()
+        )
+        if job is not None:
+            job.status = POSE_JOB_STATUS_FAILED
+            job.completed_at = datetime.utcnow()
+            job.error_message = str(exc)
+            db.commit()
+    finally:
+        db.close()
+
+
+async def _run_report_job(job_id: str) -> None:
+    db = SessionLocal()
+    try:
+        parsed_job_id = UUID(job_id)
+    except ValueError:
+        db.close()
+        return
+
+    try:
+        job = (
+            db.query(AnalysisReportJob)
+            .filter(AnalysisReportJob.id == parsed_job_id)
+            .first()
+        )
+        if job is None:
+            return
+
+        if job.status in {REPORT_JOB_STATUS_RUNNING, REPORT_JOB_STATUS_COMPLETED}:
+            return
+
+        job.status = REPORT_JOB_STATUS_RUNNING
+        job.started_at = datetime.utcnow()
+        job.error_message = None
+        db.commit()
+        db.refresh(job)
+        logger.info("report_job_started job_id=%s video_id=%s", str(job.id), job.video_id)
+
+        pose_data = pose_analysis_service.get_pose_data(job.video_id)
+        if not pose_data:
+            raise ValueError("Pose data not found. Please run pose analysis first.")
+
+        report_tuples = await analysis_report_service.generate_pose_reports(
+            db,
+            user_id=job.user_id,
+            video_id=job.video_id,
+            pose_data=pose_data,
+            athlete_slot=job.requested_slot,
+            force_regenerate=bool(job.force_regenerate),
+        )
+        serialized_results = [
+            analysis_report_service.serialize_report(
+                report,
+                athlete_slot=resolved_slot,
+                cached=cached,
+            )
+            for report, cached, resolved_slot in report_tuples
+        ]
+        job.result_json = json.dumps(serialized_results, ensure_ascii=False, default=str)
+        job.status = REPORT_JOB_STATUS_COMPLETED
+        job.completed_at = datetime.utcnow()
+        job.error_message = None
+        db.commit()
+        logger.info("report_job_completed job_id=%s video_id=%s", str(job.id), job.video_id)
+    except Exception as exc:
+        logger.exception("report_job_failed job_id=%s error=%s", job_id, str(exc))
+        job = (
+            db.query(AnalysisReportJob)
+            .filter(AnalysisReportJob.id == parsed_job_id)
+            .first()
+        )
+        if job is not None:
+            job.status = REPORT_JOB_STATUS_FAILED
+            job.completed_at = datetime.utcnow()
+            job.error_message = "分析失败，请重新分析。"
+            db.commit()
+    finally:
+        db.close()
 
 
 @router.post("/upload", response_model=VideoUploadResponse)
@@ -382,9 +624,69 @@ async def analyze_pose(
         )
 
 
+@router.post(
+    "/{video_id}/analyze/pose/jobs",
+    response_model=PoseAnalysisJobCreateResponse,
+)
+async def create_pose_analysis_job(
+    video_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user_required),
+    db: Session = Depends(get_db),
+):
+    metadata = ensure_video_access(video_id, current_user)
+    owner_id = metadata.get("user_id") or str(current_user.id)
+    owner_uuid = analysis_report_service._parse_user_id(owner_id)
+
+    job = PoseAnalysisJob(
+        user_id=owner_uuid,
+        video_id=video_id,
+        status=POSE_JOB_STATUS_PENDING,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    background_tasks.add_task(_run_pose_job, str(job.id))
+
+    return PoseAnalysisJobCreateResponse(
+        job_id=str(job.id),
+        video_id=video_id,
+        status=job.status,
+        created_at=job.created_at,
+    )
+
+
+@router.get(
+    "/{video_id}/analyze/pose/jobs/{job_id}",
+    response_model=PoseAnalysisJobStatusResponse,
+)
+async def get_pose_analysis_job_status(
+    video_id: str,
+    job_id: str,
+    current_user: User = Depends(get_current_user_required),
+    db: Session = Depends(get_db),
+):
+    ensure_video_access(video_id, current_user)
+    parsed_job_id = _parse_job_uuid(job_id)
+    query = db.query(PoseAnalysisJob).filter(
+        PoseAnalysisJob.id == parsed_job_id,
+        PoseAnalysisJob.video_id == video_id,
+    )
+    if not current_user.is_admin:
+        query = query.filter(PoseAnalysisJob.user_id == current_user.id)
+    job = query.first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Pose analysis job not found")
+
+    result = _decode_pose_job_result(job)
+    return _serialize_pose_job(job, result)
+
+
 @router.get("/{video_id}/analysis-report", response_model=AnalysisReportResponse)
 async def get_analysis_report(
     video_id: str,
+    athlete_slot: Optional[AthleteSlot] = Query(default=None),
     current_user: User = Depends(get_current_user_required),
     db: Session = Depends(get_db),
 ):
@@ -397,23 +699,26 @@ async def get_analysis_report(
         )
 
     owner_id = metadata.get("user_id") or str(current_user.id)
-    report = analysis_report_service.get_current_report(
+    report, resolved_slot = analysis_report_service.get_report_for_slot(
         db,
         user_id=owner_id,
         video_id=video_id,
-        pose_hash=analysis_report_service.build_pose_hash(pose_data),
-        model_name=analysis_report_service.model_name,
+        pose_data=pose_data,
+        athlete_slot=athlete_slot.value if athlete_slot else None,
     )
 
     if not report:
         raise HTTPException(status_code=404, detail="Analysis report not found")
 
-    return AnalysisReportResponse(**analysis_report_service.serialize_report(report))
+    return AnalysisReportResponse(
+        **analysis_report_service.serialize_report(report, athlete_slot=resolved_slot)
+    )
 
 
 @router.post("/{video_id}/analyze/pose/report", response_model=AnalysisReportGenerateResponse)
 async def generate_pose_report(
     video_id: str,
+    athlete_slot: Optional[AthleteSlot] = Query(default=None),
     force_regenerate: bool = Query(default=False),
     current_user: User = Depends(get_current_user_required),
     db: Session = Depends(get_db),
@@ -438,21 +743,101 @@ async def generate_pose_report(
 
     try:
         owner_id = metadata.get("user_id") or str(current_user.id)
-        report, cached = await analysis_report_service.generate_pose_report(
+        report, cached, resolved_slot = await analysis_report_service.generate_pose_report(
             db,
             user_id=owner_id,
             video_id=video_id,
             pose_data=pose_data,
+            athlete_slot=athlete_slot.value if athlete_slot else None,
             force_regenerate=force_regenerate,
         )
         return AnalysisReportGenerateResponse(
-            **analysis_report_service.serialize_report(report, cached=cached)
+            **analysis_report_service.serialize_report(
+                report,
+                athlete_slot=resolved_slot,
+                cached=cached,
+            )
         )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        logger.exception("generate_pose_report_failed video_id=%s error=%s", video_id, str(e))
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to generate report: {str(e)}"
+            detail="分析失败，请重新分析。"
         )
+
+
+@router.post(
+    "/{video_id}/analyze/pose/report/jobs",
+    response_model=AnalysisReportJobCreateResponse,
+)
+async def create_pose_report_job(
+    video_id: str,
+    background_tasks: BackgroundTasks,
+    athlete_slot: Optional[AthleteSlot] = Query(default=None),
+    force_regenerate: bool = Query(default=False),
+    current_user: User = Depends(get_current_user_required),
+    db: Session = Depends(get_db),
+):
+    metadata = ensure_video_access(video_id, current_user)
+    pose_data = pose_analysis_service.get_pose_data(video_id)
+    if not pose_data:
+        raise HTTPException(
+            status_code=404,
+            detail="Pose data not found. Please run pose analysis first.",
+        )
+
+    owner_id = metadata.get("user_id") or str(current_user.id)
+    owner_uuid = analysis_report_service._parse_user_id(owner_id)
+    requested_slot = _normalize_requested_slot(athlete_slot)
+    job = AnalysisReportJob(
+        user_id=owner_uuid,
+        video_id=video_id,
+        requested_slot=requested_slot,
+        force_regenerate=bool(force_regenerate),
+        status=REPORT_JOB_STATUS_PENDING,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    background_tasks.add_task(_run_report_job, str(job.id))
+
+    response_slot = AthleteSlot(requested_slot) if requested_slot in {"left", "right"} else None
+    return AnalysisReportJobCreateResponse(
+        job_id=str(job.id),
+        video_id=video_id,
+        athlete_slot=response_slot,
+        status=job.status,
+        created_at=job.created_at,
+    )
+
+
+@router.get(
+    "/{video_id}/analyze/pose/report/jobs/{job_id}",
+    response_model=AnalysisReportJobStatusResponse,
+)
+async def get_pose_report_job_status(
+    video_id: str,
+    job_id: str,
+    current_user: User = Depends(get_current_user_required),
+    db: Session = Depends(get_db),
+):
+    ensure_video_access(video_id, current_user)
+    parsed_job_id = _parse_job_uuid(job_id)
+    query = db.query(AnalysisReportJob).filter(
+        AnalysisReportJob.id == parsed_job_id,
+        AnalysisReportJob.video_id == video_id,
+    )
+    if not current_user.is_admin:
+        query = query.filter(AnalysisReportJob.user_id == current_user.id)
+    job = query.first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Report job not found")
+
+    results = _decode_job_results(job)
+    return _serialize_report_job(job, results)
 
 
 @router.get("/{video_id}/pose-overlay", response_model=PoseOverlayResponse)

@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import Link from "next/link";
 import { buildApiUrl } from "@/lib/api";
+import { getFrameAthlete, type PoseData } from "@/lib/pose-data";
 import { TopNav } from "@/components/top-nav";
 
 const POSE_CONNECTIONS = [
@@ -27,21 +28,6 @@ const DEMO_NAV_LINKS = [
   { href: "/feedback", label: "Feedback" },
   { href: "/admin", label: "Admin", adminOnly: true },
 ] as const;
-
-interface PoseFrame {
-  frame_index: number;
-  landmarks: Array<{ x: number; y: number; z: number; visibility: number }>;
-}
-
-interface PoseData {
-  pose_sequence: PoseFrame[];
-  video_properties: {
-    width: number;
-    height: number;
-    fps: number;
-    frame_count: number;
-  };
-}
 
 export default function Demo() {
   const [showOverlay, setShowOverlay] = useState(false);
@@ -84,42 +70,53 @@ export default function Demo() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     const frame = poseData.pose_sequence[currentFrame];
-    if (!frame || !frame.landmarks) return;
+    const athletes = frame
+      ? (frame.athletes?.length ? frame.athletes : [getFrameAthlete(frame, "left")].filter(Boolean))
+      : [];
+    if (!frame || !athletes.length) return;
 
-    ctx.strokeStyle = '#DC2626';
-    ctx.lineWidth = 3;
-    ctx.fillStyle = '#FBBF24';
+    athletes.forEach((athlete, athleteIndex) => {
+      const landmarks = athlete?.landmarks ?? [];
+      const strokeColor = athlete?.slot === "right" ? "#10B981" : "#DC2626";
+      const pointColor = athlete?.slot === "right" ? "#FDE68A" : "#FBBF24";
 
-    POSE_CONNECTIONS.forEach(([i, j]) => {
-      if (i < frame.landmarks.length && j < frame.landmarks.length) {
-        const p1 = frame.landmarks[i];
-        const p2 = frame.landmarks[j];
-        if (p1.visibility > 0.3 && p2.visibility > 0.3) {
-          ctx.beginPath();
-          ctx.moveTo(p1.x * canvas.width, p1.y * canvas.height);
-          ctx.lineTo(p2.x * canvas.width, p2.y * canvas.height);
-          ctx.stroke();
-        }
-      }
-    });
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = 3;
+      ctx.fillStyle = pointColor;
 
-    Object.entries(KEY_POINT_NAMES).forEach(([idx, name]) => {
-      const index = parseInt(idx, 10);
-      if (index < frame.landmarks.length) {
-        const point = frame.landmarks[index];
-        if (point.visibility > 0.3) {
-          const x = point.x * canvas.width;
-          const y = point.y * canvas.height;
-          ctx.beginPath();
-          ctx.arc(x, y, 6, 0, 2 * Math.PI);
-          ctx.fill();
-          if (['Nose', 'L.Shoulder', 'R.Shoulder', 'L.Hip', 'R.Hip'].includes(name)) {
-            ctx.fillStyle = '#FFFFFF';
-            ctx.font = 'bold 12px sans-serif';
-            ctx.fillText(name, x + 10, y - 10);
-            ctx.fillStyle = '#FBBF24';
+      POSE_CONNECTIONS.forEach(([i, j]) => {
+        if (i < landmarks.length && j < landmarks.length) {
+          const p1 = landmarks[i] as { x?: number; y?: number; visibility?: number };
+          const p2 = landmarks[j] as { x?: number; y?: number; visibility?: number };
+          if ((p1.visibility ?? 0) > 0.3 && (p2.visibility ?? 0) > 0.3) {
+            ctx.beginPath();
+            ctx.moveTo((p1.x ?? 0) * canvas.width, (p1.y ?? 0) * canvas.height);
+            ctx.lineTo((p2.x ?? 0) * canvas.width, (p2.y ?? 0) * canvas.height);
+            ctx.stroke();
           }
         }
+      });
+
+      if (athleteIndex === 0) {
+        Object.entries(KEY_POINT_NAMES).forEach(([idx, name]) => {
+          const index = parseInt(idx, 10);
+          if (index < landmarks.length) {
+            const point = landmarks[index] as { x?: number; y?: number; visibility?: number };
+            if ((point.visibility ?? 0) > 0.3) {
+              const x = (point.x ?? 0) * canvas.width;
+              const y = (point.y ?? 0) * canvas.height;
+              ctx.beginPath();
+              ctx.arc(x, y, 6, 0, 2 * Math.PI);
+              ctx.fill();
+              if (['Nose', 'L.Shoulder', 'R.Shoulder', 'L.Hip', 'R.Hip'].includes(name)) {
+                ctx.fillStyle = '#FFFFFF';
+                ctx.font = 'bold 12px sans-serif';
+                ctx.fillText(name, x + 10, y - 10);
+                ctx.fillStyle = pointColor;
+              }
+            }
+          }
+        });
       }
     });
 

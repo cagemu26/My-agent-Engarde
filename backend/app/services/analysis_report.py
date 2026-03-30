@@ -1,5 +1,7 @@
+import asyncio
 import hashlib
 import json
+import logging
 import re
 import uuid
 from typing import Any, Optional, Union
@@ -9,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.models import AnalysisReport
 from app.services.llm import llm_service
+from app.services.pose_analysis import pose_analysis_service
 
 
 POSE_REPORT_TYPE = "pose_analysis"
@@ -21,8 +24,33 @@ POSE_REPORT_TARGET_PROMPT_CHARS = 120000
 POSE_REPORT_MAX_GENERATION_ATTEMPTS = 2
 POSE_REPORT_SUMMARY_MAX_CHARS = 220
 POSE_REPORT_TEMPERATURE = 0.35
-POSE_REPORT_MAX_TOKENS = 1400
-POSE_REPORT_REQUIRED_MARKERS = ("姿态分析", "动作识别", "训练建议")
+POSE_REPORT_MAX_TOKENS = 2800
+POSE_REPORT_DEFAULT_SLOT = "left"
+POSE_REPORT_VALID_SLOTS = {"left", "right"}
+POSE_REPORT_SLOT_GENERATION_ORDER = ("left", "right")
+POSE_REPORT_MIN_EFFECTIVE_FRAMES = 30
+POSE_REPORT_STATUS_READY = "ready"
+POSE_REPORT_STATUS_INSUFFICIENT = "insufficient_data"
+POSE_REPORT_SECTION_MARKER_GROUPS = (
+    ("姿态分析", "pose analysis", "technical analysis", "overall stance"),
+    ("动作识别", "action recognition", "movement recognition", "动作分析"),
+    ("训练建议", "training recommendation", "training suggestion", "training plan"),
+)
+POSE_REPORT_METADATA_HINTS = (
+    "视频id",
+    "video id",
+    "分析对象",
+    "analysis subject",
+    "处理帧数",
+    "frames analyzed",
+)
+POSE_REPORT_RETRY_MESSAGE = "分析失败，请重新分析。"
+POSE_REPORT_LEGACY_FALLBACK_MARKERS = (
+    "由于云端响应不稳定，采用了降级报告模板",
+    "当前未检测到足够的",
+)
+
+logger = logging.getLogger(__name__)
 
 
 class AnalysisReportService:
@@ -48,6 +76,107 @@ class AnalysisReportService:
             separators=(",", ":"),
         )
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _normalize_requested_slot(self, athlete_slot: Optional[str]) -> str:
+        requested_slot = (athlete_slot or POSE_REPORT_DEFAULT_SLOT).strip().lower()
+        if requested_slot not in POSE_REPORT_VALID_SLOTS:
+            raise ValueError(f"Invalid athlete slot: {athlete_slot}")
+        return requested_slot
+
+    def _available_slots(self, pose_data: dict[str, Any]) -> list[str]:
+        discovered_slots = pose_analysis_service.get_available_slots(pose_data)
+        return [slot for slot in POSE_REPORT_SLOT_GENERATION_ORDER if slot in discovered_slots]
+
+    def _resolve_athlete_slot(
+        self,
+        pose_data: dict[str, Any],
+        athlete_slot: Optional[str],
+        *,
+        strict_availability: bool = True,
+    ) -> str:
+        requested_slot = self._normalize_requested_slot(athlete_slot)
+        available_slots = self._available_slots(pose_data)
+        if requested_slot in available_slots:
+            return requested_slot
+        if not available_slots:
+            return requested_slot
+        if strict_availability:
+            if requested_slot != available_slots[0]:
+                raise ValueError(f"{requested_slot.capitalize()} athlete data is not available for this video.")
+            return available_slots[0]
+        return requested_slot
+
+    def _report_type_for_slot(
+        self,
+        pose_data: dict[str, Any],
+        athlete_slot: str,
+        *,
+        force_slot_specific: bool = False,
+    ) -> str:
+        if force_slot_specific or len(self._available_slots(pose_data)) >= 2:
+            return f"{POSE_REPORT_TYPE}_{athlete_slot}"
+        return POSE_REPORT_TYPE
+
+    def _build_insufficient_slot_pose_data(
+        self,
+        pose_data: dict[str, Any],
+        athlete_slot: str,
+        *,
+        effective_frames: int,
+    ) -> dict[str, Any]:
+        normalized_processing = {
+            **pose_data.get("processing", {}),
+            "selected_athlete_slot": athlete_slot,
+            "selected_athlete_track_id": athlete_slot,
+            "data_status": POSE_REPORT_STATUS_INSUFFICIENT,
+            "effective_frames": int(effective_frames),
+            "min_required_frames": POSE_REPORT_MIN_EFFECTIVE_FRAMES,
+            "available_slots": self._available_slots(pose_data),
+        }
+        return {
+            "video_id": pose_data.get("video_id"),
+            "video_path": pose_data.get("video_path"),
+            "analysis_type": pose_data.get("analysis_type", "pose"),
+            "timestamp": pose_data.get("timestamp"),
+            "schema_version": pose_data.get("schema_version"),
+            "detector_info": pose_data.get("detector_info", {}),
+            "video_properties": pose_data.get("video_properties", {}),
+            "processing": normalized_processing,
+            "player_summary": None,
+            "pose_sequence": [],
+            "pose_data_path": pose_data.get("pose_data_path"),
+        }
+
+    def _prepare_slot_pose_data(
+        self,
+        pose_data: dict[str, Any],
+        athlete_slot: str,
+    ) -> tuple[dict[str, Any], str, int]:
+        effective_frames = 0
+        slot_pose_data: Optional[dict[str, Any]] = None
+        available_slots = self._available_slots(pose_data)
+        if athlete_slot in available_slots:
+            try:
+                slot_pose_data = pose_analysis_service.extract_slot_pose_data(pose_data, athlete_slot)
+            except ValueError:
+                slot_pose_data = None
+
+        if slot_pose_data:
+            effective_frames = len(slot_pose_data.get("pose_sequence", []))
+            if effective_frames >= POSE_REPORT_MIN_EFFECTIVE_FRAMES:
+                return slot_pose_data, POSE_REPORT_STATUS_READY, effective_frames
+
+        insufficient_payload = self._build_insufficient_slot_pose_data(
+            pose_data,
+            athlete_slot,
+            effective_frames=effective_frames,
+        )
+        return insufficient_payload, POSE_REPORT_STATUS_INSUFFICIENT, effective_frames
+
+    def _serialize_slot_label(self, athlete_slot: Optional[str]) -> str:
+        if athlete_slot == "right":
+            return "Right Athlete"
+        return "Left Athlete"
 
     def _frame_landmark_map(self, frame: dict[str, Any]) -> dict[str, dict[str, Any]]:
         frame_map: dict[str, dict[str, Any]] = {}
@@ -132,6 +261,8 @@ class AnalysisReportService:
     def build_pose_prompt(self, video_id: str, pose_data: dict[str, Any]) -> str:
         pose_sequence = pose_data.get("pose_sequence", [])
         video_props = pose_data.get("video_properties", {})
+        selected_slot = str(pose_data.get("processing", {}).get("selected_athlete_slot", POSE_REPORT_DEFAULT_SLOT))
+        slot_label = self._serialize_slot_label(selected_slot)
         total_frames = len(pose_sequence)
         if total_frames == 0:
             return f"""你是一位专业的击剑教练AI助手。当前视频 {video_id} 没有可用姿态数据。
@@ -228,6 +359,7 @@ class AnalysisReportService:
 
 ## 视频信息
 - Video ID: {video_id}
+- 分析对象: {slot_label}
 - 总帧数: {video_props.get('frame_count', 'N/A')}
 - FPS: {video_props.get('fps', 'N/A')}
 - 时长: {video_props.get('duration', 0):.2f}秒
@@ -261,6 +393,7 @@ class AnalysisReportService:
 
 ## 视频信息
 - Video ID: {video_id}
+- 分析对象: {slot_label}
 - 总帧数: {video_props.get('frame_count', 'N/A')}
 - FPS: {video_props.get('fps', 'N/A')}
 - 时长: {video_props.get('duration', 0):.2f}秒
@@ -303,70 +436,78 @@ class AnalysisReportService:
     def _normalize_model_output(self, text: str) -> str:
         return text.replace("\r\n", "\n").strip()
 
+    def _is_legacy_fallback_report(self, report_body_md: str) -> bool:
+        lowered = (report_body_md or "").lower()
+        if not lowered:
+            return False
+        return any(marker.lower() in lowered for marker in POSE_REPORT_LEGACY_FALLBACK_MARKERS)
+
+    def _count_marker_group_hits(self, normalized_text: str) -> int:
+        lowered = normalized_text.lower()
+        hits = 0
+        for group in POSE_REPORT_SECTION_MARKER_GROUPS:
+            if any(marker in lowered for marker in group):
+                hits += 1
+        return hits
+
+    def _contains_report_metadata(self, normalized_text: str) -> bool:
+        lowered = normalized_text.lower()
+        return any(marker in lowered for marker in POSE_REPORT_METADATA_HINTS)
+
     def _is_valid_report_output(self, text: str) -> bool:
         if not text or len(text) < 200:
             return False
-        marker_hits = sum(marker in text for marker in POSE_REPORT_REQUIRED_MARKERS)
+
+        marker_hits = self._count_marker_group_hits(text)
+        has_markdown_header = text.lstrip().startswith("#")
+        has_metadata_hint = self._contains_report_metadata(text)
+        has_training_section = any(marker in text.lower() for marker in POSE_REPORT_SECTION_MARKER_GROUPS[2])
+
         if marker_hits >= 2:
             return True
-        return text.startswith("# ") and "训练建议" in text
-
-    def _build_deterministic_fallback_report(self, video_id: str, pose_data: dict[str, Any]) -> str:
-        pose_sequence = pose_data.get("pose_sequence", [])
-        video_props = pose_data.get("video_properties", {})
-        processing = pose_data.get("processing", {})
-        vis_values: list[float] = []
-        for frame in pose_sequence:
-            for landmark in frame.get("landmarks", []):
-                visibility = landmark.get("visibility")
-                if isinstance(visibility, (int, float)):
-                    vis_values.append(float(visibility))
-        avg_visibility = sum(vis_values) / len(vis_values) if vis_values else 0.0
-
-        return f"""# 姿态分析
-
-- 视频ID: {video_id}
-- 总帧数: {video_props.get("frame_count", "N/A")}
-- FPS: {video_props.get("fps", "N/A")}
-- 时长: {video_props.get("duration", 0):.2f}秒
-- 处理帧数: {processing.get("processed_frames", len(pose_sequence))}
-- 平均可见度: {avg_visibility:.2f}
-
-# 动作识别
-
-本次已成功读取姿态序列并完成基础动作趋势判断。由于云端响应不稳定，采用了降级报告模板，建议结合骨架回放逐段复核弓步启动、还原和步法节奏。
-
-# 技术优点
-
-1. 姿态数据覆盖完整，可用于训练复盘。
-2. 肩髋与下肢关键点可见度基本可用。
-
-# 技术问题
-
-1. 快速转换阶段容易出现重心波动，建议重点观察肩髋高度变化。
-2. 步法连续性与还原节奏需要在回放中逐段确认。
-
-# 训练建议
-
-1. 进行 3 组 5 分钟的进退步与弓步连贯训练，控制重心平稳。
-2. 在每次弓步后加入固定还原节奏训练，避免上身前扑。
-3. 对照骨架回放逐帧复盘，优先修正肩线倾斜和站姿宽度波动。"""
+        return has_markdown_header and has_metadata_hint and has_training_section
 
     async def _generate_report_body(self, video_id: str, pose_data: dict[str, Any]) -> str:
         prompt = self.build_pose_prompt(video_id, pose_data)
+        selected_slot = str(pose_data.get("processing", {}).get("selected_athlete_slot", POSE_REPORT_DEFAULT_SLOT))
 
-        for _ in range(POSE_REPORT_MAX_GENERATION_ATTEMPTS):
+        for attempt in range(1, POSE_REPORT_MAX_GENERATION_ATTEMPTS + 1):
             report_text = await llm_service.chat(
                 messages=[{"role": "user", "content": prompt}],
                 context="Pose analysis report generation",
                 temperature=POSE_REPORT_TEMPERATURE,
                 max_tokens=POSE_REPORT_MAX_TOKENS,
+                response_language_override="zh",
             )
             normalized = self._normalize_model_output(report_text)
             if self._is_valid_report_output(normalized):
+                logger.info(
+                    "analysis_report_llm_success video_id=%s slot=%s attempt=%s prompt_chars=%s output_chars=%s",
+                    video_id,
+                    selected_slot,
+                    attempt,
+                    len(prompt),
+                    len(normalized),
+                )
                 return normalized
+            logger.warning(
+                "analysis_report_llm_invalid video_id=%s slot=%s attempt=%s prompt_chars=%s output_chars=%s marker_hits=%s",
+                video_id,
+                selected_slot,
+                attempt,
+                len(prompt),
+                len(normalized),
+                self._count_marker_group_hits(normalized),
+            )
 
-        return self._build_deterministic_fallback_report(video_id, pose_data)
+        logger.error(
+            "analysis_report_llm_failed video_id=%s slot=%s attempts=%s prompt_chars=%s",
+            video_id,
+            selected_slot,
+            POSE_REPORT_MAX_GENERATION_ATTEMPTS,
+            len(prompt),
+        )
+        raise RuntimeError(POSE_REPORT_RETRY_MESSAGE)
 
     def _parse_user_id(self, user_id: Union[str, uuid.UUID]) -> uuid.UUID:
         if isinstance(user_id, uuid.UUID):
@@ -379,6 +520,7 @@ class AnalysisReportService:
         *,
         user_id: Union[str, uuid.UUID],
         video_id: str,
+        report_type: str,
         pose_hash: str,
         model_name: str,
     ) -> Optional[AnalysisReport]:
@@ -388,7 +530,7 @@ class AnalysisReportService:
             .filter(
                 AnalysisReport.user_id == parsed_user_id,
                 AnalysisReport.video_id == video_id,
-                AnalysisReport.report_type == self.report_type,
+                AnalysisReport.report_type == report_type,
                 AnalysisReport.status == POSE_REPORT_STATUS_COMPLETED,
                 AnalysisReport.source_pose_hash == pose_hash,
                 AnalysisReport.model_name == model_name,
@@ -404,6 +546,7 @@ class AnalysisReportService:
         *,
         user_id: Union[str, uuid.UUID],
         video_id: str,
+        report_type: str,
         pose_hash: str,
         model_name: str,
     ) -> int:
@@ -413,7 +556,7 @@ class AnalysisReportService:
             .filter(
                 AnalysisReport.user_id == parsed_user_id,
                 AnalysisReport.video_id == video_id,
-                AnalysisReport.report_type == self.report_type,
+                AnalysisReport.report_type == report_type,
                 AnalysisReport.source_pose_hash == pose_hash,
                 AnalysisReport.model_name == model_name,
                 AnalysisReport.prompt_version == self.prompt_version,
@@ -422,39 +565,72 @@ class AnalysisReportService:
         )
         return int(current_max or 0) + 1
 
-    async def generate_pose_report(
+    def _preferred_slot_for_default(self, pose_data: dict[str, Any]) -> str:
+        available_slots = self._available_slots(pose_data)
+        if POSE_REPORT_DEFAULT_SLOT in available_slots:
+            return POSE_REPORT_DEFAULT_SLOT
+        if available_slots:
+            return available_slots[0]
+        return POSE_REPORT_DEFAULT_SLOT
+
+    async def _generate_or_get_slot_report(
         self,
         db: Session,
         *,
         user_id: Union[str, uuid.UUID],
         video_id: str,
         pose_data: dict[str, Any],
-        force_regenerate: bool = False,
-    ) -> tuple[AnalysisReport, bool]:
-        pose_hash = self.build_pose_hash(pose_data)
+        athlete_slot: str,
+        force_regenerate: bool,
+        force_slot_specific_type: bool,
+    ) -> tuple[AnalysisReport, bool, str]:
+        slot_pose_data, data_status, effective_frames = self._prepare_slot_pose_data(pose_data, athlete_slot)
+        pose_hash = self.build_pose_hash(slot_pose_data)
         model_name = self.model_name
+        report_type = self._report_type_for_slot(
+            pose_data,
+            athlete_slot,
+            force_slot_specific=force_slot_specific_type,
+        )
         cached_report = self.get_current_report(
             db,
             user_id=user_id,
             video_id=video_id,
+            report_type=report_type,
             pose_hash=pose_hash,
             model_name=model_name,
         )
-        if cached_report and cached_report.report_body_md.strip() and not force_regenerate:
-            return cached_report, True
+        if (
+            cached_report
+            and cached_report.report_body_md.strip()
+            and not self._is_legacy_fallback_report(cached_report.report_body_md)
+            and not force_regenerate
+        ):
+            return cached_report, True, athlete_slot
 
-        report_text = await self._generate_report_body(video_id, pose_data)
+        if data_status == POSE_REPORT_STATUS_READY:
+            report_text = await self._generate_report_body(video_id, slot_pose_data)
+        else:
+            logger.warning(
+                "analysis_report_insufficient_pose_data video_id=%s slot=%s effective_frames=%s min_required=%s",
+                video_id,
+                athlete_slot,
+                effective_frames,
+                POSE_REPORT_MIN_EFFECTIVE_FRAMES,
+            )
+            raise RuntimeError(POSE_REPORT_RETRY_MESSAGE)
         summary_text = self.build_summary(report_text)
 
         report = AnalysisReport(
             user_id=self._parse_user_id(user_id),
             video_id=video_id,
-            report_type=self.report_type,
+            report_type=report_type,
             status=POSE_REPORT_STATUS_COMPLETED,
             report_version=self._next_report_version(
                 db,
                 user_id=user_id,
                 video_id=video_id,
+                report_type=report_type,
                 pose_hash=pose_hash,
                 model_name=model_name,
             ),
@@ -463,17 +639,272 @@ class AnalysisReportService:
             model_name=model_name,
             prompt_version=self.prompt_version,
             source_pose_hash=pose_hash,
-            source_pose_path=pose_data.get("pose_data_path"),
+            source_pose_path=slot_pose_data.get("pose_data_path"),
         )
         db.add(report)
         db.commit()
         db.refresh(report)
-        return report, False
+        return report, False, athlete_slot
 
-    def serialize_report(self, report: AnalysisReport, *, cached: Optional[bool] = None) -> dict[str, Any]:
+    async def _generate_or_get_dual_slot_reports_parallel(
+        self,
+        db: Session,
+        *,
+        user_id: Union[str, uuid.UUID],
+        video_id: str,
+        pose_data: dict[str, Any],
+        force_regenerate: bool,
+    ) -> list[tuple[AnalysisReport, bool, str]]:
+        slot_states: dict[str, dict[str, Any]] = {}
+        ready_slots_for_llm: list[str] = []
+        model_name = self.model_name
+
+        for slot in POSE_REPORT_SLOT_GENERATION_ORDER:
+            slot_pose_data, data_status, effective_frames = self._prepare_slot_pose_data(pose_data, slot)
+            pose_hash = self.build_pose_hash(slot_pose_data)
+            report_type = self._report_type_for_slot(
+                pose_data,
+                slot,
+                force_slot_specific=True,
+            )
+            cached_report = self.get_current_report(
+                db,
+                user_id=user_id,
+                video_id=video_id,
+                report_type=report_type,
+                pose_hash=pose_hash,
+                model_name=model_name,
+            )
+            if (
+                cached_report
+                and cached_report.report_body_md.strip()
+                and not self._is_legacy_fallback_report(cached_report.report_body_md)
+                and not force_regenerate
+            ):
+                slot_states[slot] = {
+                    "cached_report": cached_report,
+                    "cached": True,
+                    "slot_pose_data": slot_pose_data,
+                    "pose_hash": pose_hash,
+                    "report_type": report_type,
+                    "data_status": data_status,
+                    "effective_frames": effective_frames,
+                }
+                continue
+
+            slot_states[slot] = {
+                "cached_report": None,
+                "cached": False,
+                "slot_pose_data": slot_pose_data,
+                "pose_hash": pose_hash,
+                "report_type": report_type,
+                "data_status": data_status,
+                "effective_frames": effective_frames,
+            }
+            if data_status == POSE_REPORT_STATUS_READY:
+                ready_slots_for_llm.append(slot)
+
+        insufficient_slots = [
+            slot
+            for slot, state in slot_states.items()
+            if state["cached_report"] is None and state["data_status"] != POSE_REPORT_STATUS_READY
+        ]
+        if insufficient_slots:
+            logger.warning(
+                "analysis_report_insufficient_pose_data_multi video_id=%s slots=%s",
+                video_id,
+                ",".join(insufficient_slots),
+            )
+            raise RuntimeError(POSE_REPORT_RETRY_MESSAGE)
+
+        llm_text_by_slot: dict[str, str] = {}
+        if ready_slots_for_llm:
+            llm_responses = await asyncio.gather(
+                *[
+                    self._generate_report_body(video_id, slot_states[slot]["slot_pose_data"])
+                    for slot in ready_slots_for_llm
+                ],
+                return_exceptions=True,
+            )
+            for slot, response in zip(ready_slots_for_llm, llm_responses):
+                if isinstance(response, Exception):
+                    logger.warning(
+                        "analysis_report_llm_slot_failed video_id=%s slot=%s error=%s",
+                        video_id,
+                        slot,
+                        str(response),
+                    )
+                    raise RuntimeError(POSE_REPORT_RETRY_MESSAGE)
+                llm_text_by_slot[slot] = response
+
+        persisted_results: dict[str, tuple[AnalysisReport, bool, str]] = {}
+        for slot in POSE_REPORT_SLOT_GENERATION_ORDER:
+            state = slot_states[slot]
+            if state["cached_report"] is not None:
+                persisted_results[slot] = (state["cached_report"], True, slot)
+                continue
+
+            if state["data_status"] == POSE_REPORT_STATUS_READY:
+                report_text = llm_text_by_slot.get(slot)
+                if not report_text:
+                    raise RuntimeError(POSE_REPORT_RETRY_MESSAGE)
+            else:
+                raise RuntimeError(POSE_REPORT_RETRY_MESSAGE)
+            summary_text = self.build_summary(report_text)
+
+            report = AnalysisReport(
+                user_id=self._parse_user_id(user_id),
+                video_id=video_id,
+                report_type=state["report_type"],
+                status=POSE_REPORT_STATUS_COMPLETED,
+                report_version=self._next_report_version(
+                    db,
+                    user_id=user_id,
+                    video_id=video_id,
+                    report_type=state["report_type"],
+                    pose_hash=state["pose_hash"],
+                    model_name=model_name,
+                ),
+                report_body_md=report_text,
+                summary=summary_text,
+                model_name=model_name,
+                prompt_version=self.prompt_version,
+                source_pose_hash=state["pose_hash"],
+                source_pose_path=state["slot_pose_data"].get("pose_data_path"),
+            )
+            db.add(report)
+            db.commit()
+            db.refresh(report)
+            persisted_results[slot] = (report, False, slot)
+
+        return [persisted_results[slot] for slot in POSE_REPORT_SLOT_GENERATION_ORDER]
+
+    async def generate_pose_reports(
+        self,
+        db: Session,
+        *,
+        user_id: Union[str, uuid.UUID],
+        video_id: str,
+        pose_data: dict[str, Any],
+        athlete_slot: Optional[str] = None,
+        force_regenerate: bool = False,
+    ) -> list[tuple[AnalysisReport, bool, str]]:
+        if athlete_slot:
+            requested_slot = self._resolve_athlete_slot(
+                pose_data,
+                athlete_slot,
+                strict_availability=False,
+            )
+            one_report = await self._generate_or_get_slot_report(
+                db,
+                user_id=user_id,
+                video_id=video_id,
+                pose_data=pose_data,
+                athlete_slot=requested_slot,
+                force_regenerate=force_regenerate,
+                force_slot_specific_type=True,
+            )
+            return [one_report]
+
+        return await self._generate_or_get_dual_slot_reports_parallel(
+            db,
+            user_id=user_id,
+            video_id=video_id,
+            pose_data=pose_data,
+            force_regenerate=force_regenerate,
+        )
+
+    def get_report_for_slot(
+        self,
+        db: Session,
+        *,
+        user_id: Union[str, uuid.UUID],
+        video_id: str,
+        pose_data: dict[str, Any],
+        athlete_slot: Optional[str],
+    ) -> tuple[Optional[AnalysisReport], str]:
+        requested_slot = (
+            self._resolve_athlete_slot(pose_data, athlete_slot, strict_availability=False)
+            if athlete_slot
+            else self._preferred_slot_for_default(pose_data)
+        )
+        slot_pose_data, _, _ = self._prepare_slot_pose_data(pose_data, requested_slot)
+        pose_hash = self.build_pose_hash(slot_pose_data)
+        model_name = self.model_name
+
+        candidate_report_types: list[str] = [
+            self._report_type_for_slot(
+                pose_data,
+                requested_slot,
+                force_slot_specific=True,
+            )
+        ]
+
+        # Backward compatibility: older reports may use unsuffixed report_type.
+        if athlete_slot is None or requested_slot == POSE_REPORT_DEFAULT_SLOT:
+            candidate_report_types.append(POSE_REPORT_TYPE)
+
+        deduped_types: list[str] = []
+        for report_type in candidate_report_types:
+            if report_type not in deduped_types:
+                deduped_types.append(report_type)
+
+        for report_type in deduped_types:
+            report = self.get_current_report(
+                db,
+                user_id=user_id,
+                video_id=video_id,
+                report_type=report_type,
+                pose_hash=pose_hash,
+                model_name=model_name,
+            )
+            if report and not self._is_legacy_fallback_report(report.report_body_md):
+                return report, requested_slot
+
+        return None, requested_slot
+
+    async def generate_pose_report(
+        self,
+        db: Session,
+        *,
+        user_id: Union[str, uuid.UUID],
+        video_id: str,
+        pose_data: dict[str, Any],
+        athlete_slot: Optional[str] = None,
+        force_regenerate: bool = False,
+    ) -> tuple[AnalysisReport, bool, str]:
+        reports = await self.generate_pose_reports(
+            db,
+            user_id=user_id,
+            video_id=video_id,
+            pose_data=pose_data,
+            athlete_slot=athlete_slot,
+            force_regenerate=force_regenerate,
+        )
+        if athlete_slot:
+            return reports[0]
+
+        slot_results = {slot: report_tuple for report_tuple in reports for slot in [report_tuple[2]]}
+        preferred_slot = self._preferred_slot_for_default(pose_data)
+        return slot_results.get(preferred_slot, slot_results[POSE_REPORT_DEFAULT_SLOT])
+
+    def serialize_report(
+        self,
+        report: AnalysisReport,
+        *,
+        athlete_slot: Optional[str] = None,
+        cached: Optional[bool] = None,
+    ) -> dict[str, Any]:
+        resolved_slot = athlete_slot
+        if resolved_slot is None and report.report_type.startswith(f"{POSE_REPORT_TYPE}_"):
+            resolved_slot = report.report_type.replace(f"{POSE_REPORT_TYPE}_", "", 1)
+        if resolved_slot is None:
+            resolved_slot = POSE_REPORT_DEFAULT_SLOT
+
         payload = {
             "report_id": str(report.id),
             "video_id": report.video_id,
+            "athlete_slot": resolved_slot,
             "report": report.report_body_md,
             "summary": report.summary,
             "status": report.status,

@@ -1,20 +1,174 @@
-from fastapi import APIRouter
-from app.schemas import ChatRequest, ChatResponse, Citation, RetrievalMeta
-import httpx
-from typing import Optional
-from app.core.config import settings
+from datetime import datetime
+import json
+import logging
 from pathlib import Path
+import re
+from typing import Optional
+from uuid import UUID
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from app.core.auth import verify_token
+from app.core.config import settings
+from app.core.database import get_db
+from app.models import AnalysisReport, ChatMessage as ChatMessageModel, ChatSession, User
+from app.schemas import (
+    ChatRequest,
+    ChatResponse,
+    ChatSessionCreateRequest,
+    ChatSessionDeleteResponse,
+    ChatSessionDetailResponse,
+    ChatSessionListResponse,
+    ChatSessionMessageResponse,
+    ChatSessionResponse,
+    Citation,
+    RetrievalMeta,
+)
+from app.services.pose_analysis import pose_analysis_service
 from app.services.rag import rag_service
+from app.services.video import video_service
 
 
 router = APIRouter(tags=["chat"])
+security_optional = HTTPBearer(auto_error=False)
+logger = logging.getLogger(__name__)
 
 # Skills directory path
 SKILLS_DIR = Path(__file__).parent.parent / "skills"
-LLM_REQUEST_TIMEOUT_SECONDS = 60.0
+LLM_REQUEST_TIMEOUT_SECONDS = 120.0
 MAX_CONTEXT_CHARS = 24000
 MAX_SINGLE_MESSAGE_CHARS = 6000
 MAX_TOTAL_MESSAGES_CHARS = 18000
+MAX_SESSION_HISTORY_MESSAGES = 24
+MAX_CONTEXT_SUMMARY_CHARS = 2200
+SESSION_TYPE_VIDEO = "video_analysis"
+SESSION_TYPE_TRAINING = "training_analysis"
+SESSION_TYPE_CHAT = "chat_qa"
+VALID_SESSION_TYPES = {SESSION_TYPE_VIDEO, SESSION_TYPE_TRAINING, SESSION_TYPE_CHAT}
+
+
+def get_current_user_optional(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_optional),
+    db: Session = Depends(get_db),
+) -> Optional[User]:
+    token = credentials.credentials if credentials else None
+    if not token:
+        return None
+
+    payload = verify_token(token)
+    if payload is None:
+        return None
+
+    user_id = payload.get("sub")
+    if user_id is None:
+        return None
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None or not user.is_active:
+        return None
+    return user
+
+
+def get_current_user_required(
+    current_user: Optional[User] = Depends(get_current_user_optional),
+) -> User:
+    if current_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+        )
+    return current_user
+
+
+def _clean_optional_text(value: Optional[str], max_chars: int) -> Optional[str]:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    return cleaned[:max_chars]
+
+
+def _normalize_session_type(session_type: Optional[str]) -> str:
+    value = (session_type or SESSION_TYPE_CHAT).strip().lower()
+    if value not in VALID_SESSION_TYPES:
+        return SESSION_TYPE_CHAT
+    return value
+
+
+def _extract_user_message(request: ChatRequest) -> str:
+    if request.message and request.message.strip():
+        return request.message.strip()
+
+    for message in reversed(request.messages):
+        if message.role == "user" and message.content.strip():
+            return message.content.strip()
+    return ""
+
+
+def _parse_session_uuid(session_id: str) -> UUID:
+    try:
+        return UUID(session_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid session_id",
+        ) from exc
+
+
+def _get_session_for_user(db: Session, current_user: User, session_id: str) -> ChatSession:
+    session_uuid = _parse_session_uuid(session_id)
+    chat_session = (
+        db.query(ChatSession)
+        .filter(
+            ChatSession.id == session_uuid,
+            ChatSession.user_id == current_user.id,
+            ChatSession.is_archived.is_(False),
+        )
+        .first()
+    )
+    if chat_session is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat session not found")
+    return chat_session
+
+
+def _message_count_map(db: Session, session_ids: list[UUID]) -> dict[UUID, int]:
+    if not session_ids:
+        return {}
+    rows = (
+        db.query(ChatMessageModel.session_id, func.count(ChatMessageModel.id))
+        .filter(ChatMessageModel.session_id.in_(session_ids))
+        .group_by(ChatMessageModel.session_id)
+        .all()
+    )
+    return {session_id: int(count) for session_id, count in rows}
+
+
+def _serialize_session(chat_session: ChatSession, message_count: int) -> ChatSessionResponse:
+    return ChatSessionResponse(
+        id=str(chat_session.id),
+        video_id=chat_session.video_id,
+        session_type=chat_session.session_type or SESSION_TYPE_CHAT,
+        title=chat_session.title,
+        context_summary=chat_session.context_summary,
+        created_at=chat_session.created_at,
+        updated_at=chat_session.updated_at,
+        last_message_at=chat_session.last_message_at,
+        message_count=message_count,
+    )
+
+
+def _serialize_session_message(message: ChatMessageModel) -> ChatSessionMessageResponse:
+    return ChatSessionMessageResponse(
+        id=str(message.id),
+        role=message.role,
+        content=message.content,
+        created_at=message.created_at,
+    )
 
 
 def _load_system_prompt() -> str:
@@ -103,7 +257,8 @@ class LLMService:
         context: Optional[str] = None,
         *,
         temperature: float = 0.7,
-        max_tokens: int = 1024,
+        max_tokens: int = 2048,
+        response_language_override: Optional[str] = None,
     ) -> str:
         """
         Send chat request to MiniMax API
@@ -113,9 +268,17 @@ class LLMService:
 
         sanitized_messages = self._sanitize_messages(messages)
         clipped_context = self._clip_context(context)
+        normalized_override = (response_language_override or "").strip().lower()
+        if normalized_override in {"zh", "en", "auto"}:
+            preferred_language = normalized_override
+        else:
+            preferred_language = self._infer_response_language(sanitized_messages)
 
         # Build system prompt
-        final_prompt = self._build_fencing_system_prompt(clipped_context)
+        final_prompt = self._build_fencing_system_prompt(
+            clipped_context,
+            response_language=preferred_language,
+        )
 
         # Prepare messages for API
         api_messages = [{"role": "system", "content": final_prompt}]
@@ -145,9 +308,11 @@ class LLMService:
                         status_msg = base_resp.get("status_msg", "")
 
                         if status_code == 1008:
+                            if preferred_language == "zh":
+                                return "⚠️ AI 服务暂时不可用（API 余额不足）。请检查你的 MiniMax 账户余额。"
                             return "⚠️ AI service temporarily unavailable (insufficient API balance). Please check your MiniMax account balance."
                         elif status_code != 0:
-                            print(f"API error: {status_code} - {status_msg}")
+                            logger.warning("llm_api_error status_code=%s status_msg=%s", status_code, status_msg)
                             return self._get_fallback_response(messages)
 
                     choices = data.get("choices")
@@ -155,12 +320,10 @@ class LLMService:
                         return choices[0].get("message", {}).get("content", "")
                     return self._get_fallback_response(messages)
                 else:
-                    print(f"API error: {response.status_code} - {response.text}")
+                    logger.warning("llm_http_error status_code=%s body=%s", response.status_code, response.text[:800])
                     return self._get_fallback_response(messages)
         except Exception as e:
-            print(f"LLM API error: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception("llm_exception detail=%s", str(e))
             return self._get_fallback_response(messages)
 
     def _clip_context(self, context: Optional[str]) -> Optional[str]:
@@ -204,7 +367,37 @@ class LLMService:
 
         return list(reversed(sanitized))
 
-    def _build_fencing_system_prompt(self, context: Optional[str] = None) -> str:
+    def _infer_language_from_text(self, text: str) -> str:
+        if not text:
+            return "auto"
+
+        cjk_count = len(re.findall(r"[\u4e00-\u9fff]", text))
+        latin_count = len(re.findall(r"[A-Za-z]", text))
+
+        if cjk_count == 0 and latin_count == 0:
+            return "auto"
+        if cjk_count >= latin_count and cjk_count > 0:
+            return "zh"
+        if latin_count > cjk_count and latin_count > 0:
+            return "en"
+        return "auto"
+
+    def _infer_response_language(self, messages: list[dict]) -> str:
+        for message in reversed(messages):
+            if message.get("role") != "user":
+                continue
+            content = str(message.get("content", "")).strip()
+            if not content:
+                continue
+            return self._infer_language_from_text(content)
+        return "auto"
+
+    def _build_fencing_system_prompt(
+        self,
+        context: Optional[str] = None,
+        *,
+        response_language: str = "auto",
+    ) -> str:
         """Build system prompt with optional context (uses cached knowledge)"""
         prompt = self.system_prompt
 
@@ -219,10 +412,26 @@ class LLMService:
         if context:
             prompt += f"\n\nCurrent context from video analysis and knowledge base:\n{context}"
 
+        if response_language == "zh":
+            prompt += (
+                "\n\n## Response Language Policy\n"
+                "- Reply in Simplified Chinese.\n"
+                "- Keep technical terms clear and actionable.\n"
+                "- If the user explicitly requests another language, follow that explicit request."
+            )
+        elif response_language == "en":
+            prompt += (
+                "\n\n## Response Language Policy\n"
+                "- Reply in English.\n"
+                "- Keep guidance specific and actionable.\n"
+                "- If the user explicitly requests another language, follow that explicit request."
+            )
+
         return prompt
 
     def _get_fallback_response(self, messages: list[dict]) -> str:
         """Fallback response when API is not available (uses cached templates)"""
+        preferred_language = self._infer_response_language(messages)
         last_message = messages[-1]["content"].lower() if messages else ""
 
         # Try to get from cached templates first
@@ -235,6 +444,17 @@ class LLMService:
                         return template
 
         # Default fallback
+        if preferred_language == "zh":
+            return """这是一个很好的击剑问题！我可以继续帮你优化技术与训练。
+
+我可以提供：
+- 技术讲解（步法、手上动作、进攻与防守）
+- 训练计划与专项练习建议
+- 比赛战术与临场策略
+- 视频分析与复盘建议
+
+你想先从哪一部分开始？"""
+
         return """That's a great fencing question! I'm here to help you improve your game.
 
 I can help you with:
@@ -250,25 +470,274 @@ What would you like to know more about?"""
 llm_service = LLMService()
 
 
+@router.post("/chat/sessions", response_model=ChatSessionResponse)
+def create_chat_session(
+    request: ChatSessionCreateRequest,
+    current_user: User = Depends(get_current_user_required),
+    db: Session = Depends(get_db),
+):
+    normalized_session_type = _normalize_session_type(request.session_type)
+    normalized_video_id = _clean_optional_text(request.video_id, 64)
+    normalized_title = _clean_optional_text(request.title, 255)
+    normalized_context_summary = _clean_optional_text(request.context_summary, MAX_CONTEXT_SUMMARY_CHARS)
+
+    existing_session: Optional[ChatSession] = None
+    if not request.force_new:
+        query = (
+            db.query(ChatSession)
+            .filter(
+                ChatSession.user_id == current_user.id,
+                ChatSession.session_type == normalized_session_type,
+                ChatSession.is_archived.is_(False),
+            )
+            .order_by(func.coalesce(ChatSession.last_message_at, ChatSession.updated_at).desc())
+        )
+
+        if normalized_video_id:
+            query = query.filter(ChatSession.video_id == normalized_video_id)
+        elif normalized_session_type == SESSION_TYPE_VIDEO:
+            query = query.filter(ChatSession.video_id.is_(None))
+        else:
+            query = query.filter(ChatSession.video_id.is_(None))
+
+        existing_session = query.first()
+
+    if existing_session:
+        has_changes = False
+        if normalized_title and existing_session.title != normalized_title:
+            existing_session.title = normalized_title
+            has_changes = True
+        if normalized_context_summary and existing_session.context_summary != normalized_context_summary:
+            existing_session.context_summary = normalized_context_summary
+            has_changes = True
+        if existing_session.session_type != normalized_session_type:
+            existing_session.session_type = normalized_session_type
+            has_changes = True
+        if has_changes:
+            existing_session.updated_at = datetime.utcnow()
+            db.commit()
+            db.refresh(existing_session)
+        message_count = (
+            db.query(func.count(ChatMessageModel.id))
+            .filter(ChatMessageModel.session_id == existing_session.id)
+            .scalar()
+            or 0
+        )
+        return _serialize_session(existing_session, int(message_count))
+
+    chat_session = ChatSession(
+        user_id=current_user.id,
+        video_id=normalized_video_id,
+        session_type=normalized_session_type,
+        title=normalized_title or (
+            "Training Analysis"
+            if normalized_session_type == SESSION_TYPE_TRAINING
+            else "Video Analysis"
+            if normalized_session_type == SESSION_TYPE_VIDEO
+            else "Assistant Chat"
+        ),
+        context_summary=normalized_context_summary,
+    )
+    db.add(chat_session)
+    db.commit()
+    db.refresh(chat_session)
+    return _serialize_session(chat_session, 0)
+
+
+@router.get("/chat/sessions", response_model=ChatSessionListResponse)
+def list_chat_sessions(
+    video_id: Optional[str] = Query(default=None),
+    session_type: Optional[str] = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    current_user: User = Depends(get_current_user_required),
+    db: Session = Depends(get_db),
+):
+    query = db.query(ChatSession).filter(
+        ChatSession.user_id == current_user.id,
+        ChatSession.is_archived.is_(False),
+    )
+
+    normalized_session_type = _clean_optional_text(session_type, 32)
+    if normalized_session_type and normalized_session_type in VALID_SESSION_TYPES:
+        query = query.filter(ChatSession.session_type == normalized_session_type)
+
+    normalized_video_id = _clean_optional_text(video_id, 64)
+    if normalized_video_id:
+        query = query.filter(ChatSession.video_id == normalized_video_id)
+
+    sessions = (
+        query.order_by(func.coalesce(ChatSession.last_message_at, ChatSession.updated_at).desc())
+        .limit(limit)
+        .all()
+    )
+
+    session_ids = [item.id for item in sessions]
+    count_map = _message_count_map(db, session_ids)
+    serialized = [_serialize_session(item, count_map.get(item.id, 0)) for item in sessions]
+    return ChatSessionListResponse(sessions=serialized, total=len(serialized))
+
+
+@router.get("/chat/sessions/{session_id}", response_model=ChatSessionDetailResponse)
+def get_chat_session(
+    session_id: str,
+    limit: int = Query(default=80, ge=1, le=300),
+    current_user: User = Depends(get_current_user_required),
+    db: Session = Depends(get_db),
+):
+    chat_session = _get_session_for_user(db, current_user, session_id)
+
+    message_count = (
+        db.query(func.count(ChatMessageModel.id))
+        .filter(ChatMessageModel.session_id == chat_session.id)
+        .scalar()
+        or 0
+    )
+    messages = (
+        db.query(ChatMessageModel)
+        .filter(ChatMessageModel.session_id == chat_session.id)
+        .order_by(ChatMessageModel.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    messages.reverse()
+
+    base = _serialize_session(chat_session, int(message_count))
+    return ChatSessionDetailResponse(
+        **base.model_dump(),
+        messages=[_serialize_session_message(item) for item in messages],
+    )
+
+
+@router.delete("/chat/sessions/{session_id}", response_model=ChatSessionDeleteResponse)
+def delete_chat_session(
+    session_id: str,
+    current_user: User = Depends(get_current_user_required),
+    db: Session = Depends(get_db),
+):
+    chat_session = _get_session_for_user(db, current_user, session_id)
+    normalized_session_type = _normalize_session_type(chat_session.session_type)
+
+    if normalized_session_type != SESSION_TYPE_VIDEO or not chat_session.video_id:
+        deleted_message_count = (
+            db.query(ChatMessageModel)
+            .filter(ChatMessageModel.session_id == chat_session.id)
+            .delete(synchronize_session=False)
+        )
+        db.delete(chat_session)
+        db.commit()
+        return ChatSessionDeleteResponse(
+            deleted_scope="session_only",
+            deleted_session_count=1,
+            deleted_message_count=int(deleted_message_count or 0),
+            video_id=chat_session.video_id,
+            message="Session deleted",
+        )
+
+    video_id = chat_session.video_id
+    related_sessions = (
+        db.query(ChatSession)
+        .filter(
+            ChatSession.user_id == current_user.id,
+            ChatSession.session_type == SESSION_TYPE_VIDEO,
+            ChatSession.video_id == video_id,
+            ChatSession.is_archived.is_(False),
+        )
+        .all()
+    )
+    related_session_ids = [item.id for item in related_sessions]
+    if not related_session_ids:
+        related_session_ids = [chat_session.id]
+
+    # Best-effort filesystem cleanup (video file, metadata, analyses).
+    video_service.delete_video_assets(video_id)
+    pose_analysis_service.delete_analysis_assets(video_id)
+
+    deleted_message_count = (
+        db.query(ChatMessageModel)
+        .filter(ChatMessageModel.session_id.in_(related_session_ids))
+        .delete(synchronize_session=False)
+    )
+    deleted_session_count = (
+        db.query(ChatSession)
+        .filter(
+            ChatSession.user_id == current_user.id,
+            ChatSession.session_type == SESSION_TYPE_VIDEO,
+            ChatSession.video_id == video_id,
+        )
+        .delete(synchronize_session=False)
+    )
+    db.query(AnalysisReport).filter(
+        AnalysisReport.user_id == current_user.id,
+        AnalysisReport.video_id == video_id,
+    ).delete(synchronize_session=False)
+    db.commit()
+
+    return ChatSessionDeleteResponse(
+        deleted_scope="video_full",
+        deleted_session_count=int(deleted_session_count or 0),
+        deleted_message_count=int(deleted_message_count or 0),
+        video_id=video_id,
+        message="Video-related sessions and assets deleted",
+    )
+
+
 @router.post("/chat", response_model=ChatResponse, response_model_exclude_none=True)
-async def chat(request: ChatRequest):
+async def chat(
+    request: ChatRequest,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
+):
     """
     AI Chat endpoint for fencing questions
     """
-    messages = [{"role": msg.role, "content": msg.content} for msg in request.messages]
+    user_message = _extract_user_message(request)
+    model_messages = [{"role": msg.role, "content": msg.content} for msg in request.messages]
+
+    active_session: Optional[ChatSession] = None
+    normalized_session_id = _clean_optional_text(request.session_id, 64)
+    if normalized_session_id:
+        if current_user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required for persisted chat sessions",
+            )
+        if not user_message:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="message is required when session_id is provided",
+            )
+
+        active_session = _get_session_for_user(db, current_user, normalized_session_id)
+        history_rows = (
+            db.query(ChatMessageModel)
+            .filter(ChatMessageModel.session_id == active_session.id)
+            .order_by(ChatMessageModel.created_at.desc())
+            .limit(MAX_SESSION_HISTORY_MESSAGES)
+            .all()
+        )
+        history_rows.reverse()
+        history_messages = [{"role": row.role, "content": row.content} for row in history_rows]
+        model_messages = [*history_messages, {"role": "user", "content": user_message}]
+    elif not model_messages and user_message:
+        model_messages = [{"role": "user", "content": user_message}]
+
+    if not model_messages:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No messages provided",
+        )
 
     response_context = request.context
     citations_payload: list[dict] = []
     retrieval_meta_payload: Optional[dict] = None
 
     if request.use_kb:
-        user_query = ""
-        for message in reversed(request.messages):
-            if message.role == "user":
-                user_query = message.content
-                break
-        if not user_query and request.messages:
-            user_query = request.messages[-1].content
+        user_query = user_message
+        if not user_query:
+            for message in reversed(model_messages):
+                if message.get("role") == "user" and str(message.get("content", "")).strip():
+                    user_query = str(message.get("content", "")).strip()
+                    break
 
         kb_filters = request.kb_filters.model_dump(exclude_none=True) if request.kb_filters else {}
         response_context, citations_payload, retrieval_meta_payload = await rag_service.prepare_chat_context(
@@ -279,13 +748,46 @@ async def chat(request: ChatRequest):
             kb_filters=kb_filters,
         )
 
-    response = await llm_service.chat(messages, context=response_context)
+    response = await llm_service.chat(model_messages, context=response_context)
 
     citations = [Citation(**item) for item in citations_payload] if request.use_kb else None
     retrieval_meta = RetrievalMeta(**retrieval_meta_payload) if retrieval_meta_payload else None
 
+    if active_session and current_user:
+        if user_message:
+            db.add(
+                ChatMessageModel(
+                    session_id=active_session.id,
+                    user_id=current_user.id,
+                    role="user",
+                    content=user_message,
+                )
+            )
+
+        assistant_message = ChatMessageModel(
+            session_id=active_session.id,
+            user_id=current_user.id,
+            role="assistant",
+            content=response,
+            citations_json=json.dumps(citations_payload, ensure_ascii=False) if citations_payload else None,
+            retrieval_meta_json=(
+                json.dumps(retrieval_meta_payload, ensure_ascii=False) if retrieval_meta_payload else None
+            ),
+        )
+        db.add(assistant_message)
+
+        normalized_context_summary = _clean_optional_text(request.context, MAX_CONTEXT_SUMMARY_CHARS)
+        if normalized_context_summary:
+            active_session.context_summary = normalized_context_summary
+
+        now = datetime.utcnow()
+        active_session.last_message_at = now
+        active_session.updated_at = now
+        db.commit()
+
     return ChatResponse(
         message=response,
+        session_id=str(active_session.id) if active_session else None,
         citations=citations,
         retrieval_meta=retrieval_meta,
     )

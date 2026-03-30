@@ -10,6 +10,11 @@ class WeaponType(str, Enum):
     SABRE = "sabre"
 
 
+class AthleteSlot(str, Enum):
+    LEFT = "left"
+    RIGHT = "right"
+
+
 class MatchResult(str, Enum):
     WIN = "win"
     LOSS = "loss"
@@ -47,7 +52,9 @@ class RetrievalMeta(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    messages: list[ChatMessage]
+    messages: list[ChatMessage] = Field(default_factory=list)
+    session_id: Optional[str] = None
+    message: Optional[str] = None
     context: Optional[str] = None  # Optional video analysis context
     video_id: Optional[str] = None
     weapon: Optional[str] = None
@@ -57,9 +64,54 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     message: str
+    session_id: Optional[str] = None
     sources: Optional[list[str]] = None
     citations: Optional[list[Citation]] = None
     retrieval_meta: Optional[RetrievalMeta] = None
+
+
+class ChatSessionCreateRequest(BaseModel):
+    video_id: Optional[str] = None
+    session_type: str = "chat_qa"
+    title: Optional[str] = None
+    context_summary: Optional[str] = None
+    force_new: bool = False
+
+
+class ChatSessionMessageResponse(BaseModel):
+    id: str
+    role: str
+    content: str
+    created_at: datetime
+
+
+class ChatSessionResponse(BaseModel):
+    id: str
+    video_id: Optional[str] = None
+    session_type: str = "chat_qa"
+    title: Optional[str] = None
+    context_summary: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    last_message_at: Optional[datetime] = None
+    message_count: int = 0
+
+
+class ChatSessionDetailResponse(ChatSessionResponse):
+    messages: list[ChatSessionMessageResponse] = Field(default_factory=list)
+
+
+class ChatSessionListResponse(BaseModel):
+    sessions: list[ChatSessionResponse]
+    total: int
+
+
+class ChatSessionDeleteResponse(BaseModel):
+    deleted_scope: str
+    deleted_session_count: int
+    deleted_message_count: int
+    video_id: Optional[str] = None
+    message: str
 
 
 class KBIngestRequest(BaseModel):
@@ -134,11 +186,42 @@ class PoseLandmark(BaseModel):
     visibility: float = 1.0
 
 
+class PoseAthlete(BaseModel):
+    """Pose data for a tracked athlete within a frame."""
+    slot: AthleteSlot
+    track_id: str
+    landmarks: list[PoseLandmark]
+    visibility: list[float] = Field(default_factory=list)
+    confidence: Optional[float] = None
+    center_x: Optional[float] = None
+    center_y: Optional[float] = None
+    present: bool = True
+
+
 class PoseFrame(BaseModel):
     """Pose data for a single frame"""
     frame_index: int
     timestamp: float
-    landmarks: list[PoseLandmark]
+    athletes: list[PoseAthlete] = Field(default_factory=list)
+
+
+class PosePlayerSummary(BaseModel):
+    """Summary coverage for each tracked athlete slot."""
+    slot: AthleteSlot
+    track_id: str
+    coverage_frames: int
+    coverage_ratio: float
+    average_confidence: float
+    display_name: Optional[str] = None
+
+
+class PoseDetectorInfo(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    provider: str
+    model: str
+    num_poses: int
+    model_asset: Optional[str] = None
 
 
 class VideoProperties(BaseModel):
@@ -163,8 +246,11 @@ class PoseAnalysisData(BaseModel):
     video_path: str
     analysis_type: str
     timestamp: str
+    schema_version: int = 2
+    detector_info: Optional[PoseDetectorInfo] = None
     video_properties: VideoProperties
     processing: ProcessingInfo
+    players: list[PosePlayerSummary] = Field(default_factory=list)
     pose_sequence: list[PoseFrame]
     pose_data_path: str
 
@@ -184,6 +270,25 @@ class PoseAnalyzeResponse(BaseModel):
     total_frames: int
 
 
+class PoseAnalysisJobCreateResponse(BaseModel):
+    job_id: str
+    video_id: str
+    status: str
+    created_at: datetime
+
+
+class PoseAnalysisJobStatusResponse(BaseModel):
+    job_id: str
+    video_id: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    error: Optional[str] = None
+    result: Optional[PoseAnalyzeResponse] = None
+
+
 class PoseOverlayResponse(BaseModel):
     """Response with path to pose overlay video"""
     video_id: str
@@ -196,6 +301,7 @@ class AnalysisReportResponse(BaseModel):
 
     report_id: str
     video_id: str
+    athlete_slot: Optional[AthleteSlot] = None
     report: str
     summary: str
     status: str
@@ -207,3 +313,24 @@ class AnalysisReportResponse(BaseModel):
 
 class AnalysisReportGenerateResponse(AnalysisReportResponse):
     cached: bool = False
+
+
+class AnalysisReportJobCreateResponse(BaseModel):
+    job_id: str
+    video_id: str
+    athlete_slot: Optional[AthleteSlot] = None
+    status: str
+    created_at: datetime
+
+
+class AnalysisReportJobStatusResponse(BaseModel):
+    job_id: str
+    video_id: str
+    athlete_slot: Optional[AthleteSlot] = None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    error: Optional[str] = None
+    results: list[AnalysisReportGenerateResponse] = Field(default_factory=list)
