@@ -1,10 +1,13 @@
+import json
+from typing import Any, List
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
-from typing import List
 
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Fencing AI"
-    VERSION: str = "0.1.0"
+    VERSION: str = "1.0.0"
 
     DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/fencing_ai"
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -39,9 +42,53 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "your-secret-key-change-in-production"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
+    MIN_SECRET_KEY_LENGTH: int = 32
 
     # Email verification (set to True in production)
     REQUIRE_EMAIL_VERIFICATION: bool = True
+    EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24
+
+    FRONTEND_PUBLIC_URL: str = "http://localhost:3000"
+
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM: str = "Engarde AI <noreply@engarde.ai>"
+
+    RATE_LIMIT_ENABLED: bool = True
+    AUTH_REGISTER_IP_RATE_LIMIT: int = 10
+    AUTH_REGISTER_WINDOW_SECONDS: int = 3600
+    AUTH_LOGIN_IP_RATE_LIMIT: int = 20
+    AUTH_LOGIN_EMAIL_RATE_LIMIT: int = 10
+    AUTH_LOGIN_WINDOW_SECONDS: int = 300
+    AUTH_RESEND_VERIFICATION_IP_RATE_LIMIT: int = 10
+    AUTH_RESEND_VERIFICATION_EMAIL_RATE_LIMIT: int = 5
+    AUTH_RESEND_VERIFICATION_WINDOW_SECONDS: int = 3600
+    AUTH_VERIFY_EMAIL_IP_RATE_LIMIT: int = 60
+    AUTH_VERIFY_EMAIL_WINDOW_SECONDS: int = 3600
+    AUTH_PASSWORD_RESET_IP_RATE_LIMIT: int = 10
+    AUTH_PASSWORD_RESET_EMAIL_RATE_LIMIT: int = 5
+    AUTH_PASSWORD_RESET_WINDOW_SECONDS: int = 3600
+    AUTH_PASSWORD_RESET_CONFIRM_IP_RATE_LIMIT: int = 20
+    AUTH_PASSWORD_RESET_CONFIRM_WINDOW_SECONDS: int = 3600
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def _parse_cors_origins(cls, value: Any) -> List[str]:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                parsed = json.loads(raw)
+                if not isinstance(parsed, list):
+                    raise ValueError("CORS_ORIGINS JSON value must be a list")
+                return [str(item).strip() for item in parsed if str(item).strip()]
+            return [item.strip() for item in raw.split(",") if item.strip()]
+        raise ValueError("Unsupported CORS_ORIGINS format")
 
     class Config:
         env_file = ".env"

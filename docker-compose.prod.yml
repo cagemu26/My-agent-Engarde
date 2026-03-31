@@ -1,0 +1,31 @@
+version: "3.8"
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: fencing-ai-backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env.production
+    ports:
+      - "8000:8000"
+    volumes:
+      - ${DB_DATA_DIR:-/data/fencing-ai/db}:/app/data/db
+      - ${VIDEO_DATA_DIR:-/data/fencing-ai/videos}:/app/data/videos
+      - ${CHROMA_DATA_DIR:-/data/fencing-ai/chroma}:/app/data/chroma
+      - ${MODEL_DATA_DIR:-/data/fencing-ai/models}:/app/data/models
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
+    container_name: fencing-ai-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend

@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel, field_validator
 from app.core.database import get_db
 from app.core.auth import verify_token
+from app.core.config import settings
 from app.models import User, InvitationCode
 from app.schemas import (
     KBIngestRequest,
@@ -109,6 +110,12 @@ def get_current_admin(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User is inactive",
+        )
+    require_verified = getattr(settings, "REQUIRE_EMAIL_VERIFICATION", False)
+    if require_verified and not user.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email is not verified",
         )
     if not user.is_admin:
         raise HTTPException(

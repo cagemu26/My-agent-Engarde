@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from app.core.database import get_db
 from app.core.auth import verify_token
+from app.core.config import settings
 from app.models import User, Feedback
 
 router = APIRouter(prefix="/api/feedback", tags=["feedback"])
@@ -56,6 +57,11 @@ def get_current_user_optional(
         return None
 
     user = db.query(User).filter(User.id == user_id).first()
+    if user is None or not user.is_active:
+        return None
+    require_verified = getattr(settings, "REQUIRE_EMAIL_VERIFICATION", False)
+    if require_verified and not user.email_verified:
+        return None
     return user
 
 
@@ -128,6 +134,12 @@ def get_current_admin(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User is inactive",
+        )
+    require_verified = getattr(settings, "REQUIRE_EMAIL_VERIFICATION", False)
+    if require_verified and not user.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email is not verified",
         )
     if not user.is_admin:
         raise HTTPException(

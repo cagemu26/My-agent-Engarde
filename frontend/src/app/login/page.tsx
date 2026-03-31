@@ -4,11 +4,14 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
+import { buildApiUrl } from "@/lib/api";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [resendMessage, setResendMessage] = useState("");
+  const [isResending, setIsResending] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const { login } = useAuth();
   const router = useRouter();
@@ -16,6 +19,7 @@ export default function LoginPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setResendMessage("");
     setIsLoading(true);
 
     try {
@@ -27,6 +31,38 @@ export default function LoginPage() {
       setIsLoading(false);
     }
   };
+
+  const handleResendVerification = async () => {
+    if (!email) {
+      setError("Please enter your email first");
+      return;
+    }
+
+    setIsResending(true);
+    setResendMessage("");
+
+    try {
+      const response = await fetch(buildApiUrl("/api/auth/resend-verification"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ email }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail || "Failed to resend verification email");
+      }
+      setError("");
+      setResendMessage(data.message || "Verification email sent");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to resend verification email");
+    } finally {
+      setIsResending(false);
+    }
+  };
+
+  const shouldShowResend = error === "Please verify your email before logging in";
 
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-4">
@@ -61,6 +97,23 @@ export default function LoginPage() {
           {error && (
             <div className="mb-6 p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-500 text-sm">
               {error}
+            </div>
+          )}
+          {shouldShowResend && (
+            <div className="mb-6">
+              <button
+                type="button"
+                onClick={handleResendVerification}
+                disabled={isResending}
+                className="w-full py-2 px-4 rounded-xl border border-red-500/40 text-red-600 text-sm font-medium hover:bg-red-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isResending ? "Sending..." : "Resend verification email"}
+              </button>
+            </div>
+          )}
+          {resendMessage && (
+            <div className="mb-6 p-4 rounded-xl bg-green-500/10 border border-green-500/20 text-green-600 text-sm">
+              {resendMessage}
             </div>
           )}
 

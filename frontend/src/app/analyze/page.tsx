@@ -2226,23 +2226,153 @@ function AnalyzeContent() {
               context: contextPayload,
             };
 
-        const response = await authFetch("/chat", {
+        const requestInit: RequestInit = {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
-        });
-        if (!response.ok) {
-          throw new Error("Failed to send message");
+        };
+
+        const sendNonStreamFallback = async () => {
+          const response = await authFetch("/chat", requestInit);
+          if (!response.ok) {
+            throw new Error("Failed to send message");
+          }
+          const data = await response.json();
+          const updatedMessages = [...nextMessages, { role: "assistant" as const, content: data.message }];
+          setMessages(updatedMessages);
+          if (typeof data.session_id === "string" && data.session_id) {
+            setActiveChatSessionId(data.session_id);
+            setIsDraftChatSession(false);
+            syncAnalyzeSessionUrl(data.session_id);
+          }
+        };
+
+        const streamResponse = await authFetch("/chat/stream", requestInit);
+        const streamContentType = streamResponse.headers.get("content-type") || "";
+        const shouldUseStream = streamResponse.ok && Boolean(streamResponse.body) && streamContentType.includes("text/event-stream");
+        if (!shouldUseStream) {
+          await sendNonStreamFallback();
+          setIsTyping(false);
+          setNeedsFullContextForNextSend(false);
+          setNeedsExternalContextForNextSend(false);
+          void fetchChatSessions({ silent: true });
+          return;
         }
 
-        const data = await response.json();
+        const assistantBase = [...nextMessages, { role: "assistant" as const, content: "" }];
+        setMessages(assistantBase);
+
+        let streamedAssistant = "";
+        let finalMessageFromDone: string | null = null;
+        let resolvedSessionId: string | null = sessionIdForSend ?? null;
+        let streamErrorMessage: string | null = null;
+
+        const applyAssistantText = (text: string) => {
+          setMessages([...nextMessages, { role: "assistant" as const, content: text }]);
+        };
+
+        const processEventBlock = (block: string) => {
+          const lines = block.split("\n");
+          let eventType = "message";
+          const dataLines: string[] = [];
+
+          for (const line of lines) {
+            if (line.startsWith("event:")) {
+              eventType = line.slice(6).trim();
+              continue;
+            }
+            if (line.startsWith("data:")) {
+              dataLines.push(line.slice(5).trimStart());
+            }
+          }
+
+          if (!dataLines.length) return;
+          const rawData = dataLines.join("\n");
+          let payloadData: Record<string, unknown> | null = null;
+          try {
+            payloadData = JSON.parse(rawData) as Record<string, unknown>;
+          } catch {
+            payloadData = { message: rawData };
+          }
+
+          if (eventType === "meta") {
+            const maybeSessionId = payloadData?.session_id;
+            if (typeof maybeSessionId === "string" && maybeSessionId) {
+              resolvedSessionId = maybeSessionId;
+            }
+            return;
+          }
+
+          if (eventType === "chunk") {
+            const delta = payloadData?.delta;
+            if (typeof delta === "string" && delta) {
+              streamedAssistant += delta;
+              applyAssistantText(streamedAssistant);
+            }
+            return;
+          }
+
+          if (eventType === "done") {
+            const maybeMessage = payloadData?.message;
+            if (typeof maybeMessage === "string" && maybeMessage) {
+              finalMessageFromDone = maybeMessage;
+            }
+            const maybeSessionId = payloadData?.session_id;
+            if (typeof maybeSessionId === "string" && maybeSessionId) {
+              resolvedSessionId = maybeSessionId;
+            }
+            return;
+          }
+
+          if (eventType === "error") {
+            const maybeError = payloadData?.message;
+            streamErrorMessage = typeof maybeError === "string" && maybeError ? maybeError : "Failed to stream response";
+          }
+        };
+
+        const reader = streamResponse.body!.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buffer = "";
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          let splitIndex = buffer.indexOf("\n\n");
+          while (splitIndex !== -1) {
+            const eventBlock = buffer.slice(0, splitIndex).trim();
+            buffer = buffer.slice(splitIndex + 2);
+            if (eventBlock) {
+              processEventBlock(eventBlock);
+            }
+            splitIndex = buffer.indexOf("\n\n");
+          }
+        }
+        buffer += decoder.decode();
+        const trailingBlock = buffer.trim();
+        if (trailingBlock) {
+          processEventBlock(trailingBlock);
+        }
+
+        if (streamErrorMessage) {
+          throw new Error(streamErrorMessage);
+        }
+
+        if (finalMessageFromDone) {
+          streamedAssistant = finalMessageFromDone;
+          applyAssistantText(streamedAssistant);
+        }
+
+        if (!streamedAssistant.trim()) {
+          throw new Error("Failed to receive streamed response");
+        }
+
         setIsTyping(false);
-        const updatedMessages = [...nextMessages, { role: "assistant" as const, content: data.message }];
-        setMessages(updatedMessages);
-        if (typeof data.session_id === "string" && data.session_id) {
-          setActiveChatSessionId(data.session_id);
+        if (typeof resolvedSessionId === "string" && resolvedSessionId) {
+          setActiveChatSessionId(resolvedSessionId);
           setIsDraftChatSession(false);
-          syncAnalyzeSessionUrl(data.session_id);
+          syncAnalyzeSessionUrl(resolvedSessionId);
         }
         setNeedsFullContextForNextSend(false);
         setNeedsExternalContextForNextSend(false);

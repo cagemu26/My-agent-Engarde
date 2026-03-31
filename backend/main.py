@@ -15,7 +15,7 @@ from app import models  # noqa: F401
 app = FastAPI(
     title="Engarde AI API",
     description="API for Engarde AI - Fencing Intelligence Platform",
-    version="0.1.0"
+    version="1.0.0"
 )
 
 app.add_middleware(
@@ -33,6 +33,22 @@ app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(feedback_router)
 app.include_router(training_router)
+
+
+def _validate_security_settings() -> None:
+    secret = (settings.SECRET_KEY or "").strip()
+    insecure_values = {
+        "",
+        "your-secret-key-change-in-production",
+        "replace-with-a-long-random-string",
+        "changeme",
+        "secret",
+    }
+    if secret in insecure_values or len(secret) < settings.MIN_SECRET_KEY_LENGTH:
+        raise RuntimeError(
+            "Invalid SECRET_KEY: set a strong random secret (at least "
+            f"{settings.MIN_SECRET_KEY_LENGTH} chars) before starting the server."
+        )
 
 
 def _drop_legacy_training_log_uniqueness() -> None:
@@ -143,11 +159,34 @@ def _ensure_chat_session_schema() -> None:
         )
 
 
+def _ensure_auth_schema() -> None:
+    with engine.begin() as connection:
+        if engine.dialect.name == "postgresql":
+            connection.execute(
+                text("ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_token_expires TIMESTAMP")
+            )
+            return
+
+        if engine.dialect.name == "sqlite":
+            columns = connection.execute(text("PRAGMA table_info(users)")).fetchall()
+            column_names = {row[1] for row in columns}
+            if "verification_token_expires" not in column_names:
+                connection.execute(text("ALTER TABLE users ADD COLUMN verification_token_expires DATETIME"))
+            return
+
+        try:
+            connection.execute(text("ALTER TABLE users ADD COLUMN verification_token_expires DATETIME"))
+        except Exception:
+            pass
+
+
 @app.on_event("startup")
 def ensure_database_tables():
+    _validate_security_settings()
     Base.metadata.create_all(bind=engine)
     _drop_legacy_training_log_uniqueness()
     _ensure_chat_session_schema()
+    _ensure_auth_schema()
 
 
 @app.get("/")

@@ -3,19 +3,26 @@ Email service for sending verification emails.
 Currently supports console output (for development) and SMTP (for production).
 """
 import secrets
-from datetime import datetime, timedelta
 from typing import Optional
+from urllib.parse import urlencode
 from app.core.config import settings
 
 
 class EmailService:
     def __init__(self):
-        self.smtp_host = getattr(settings, 'SMTP_HOST', None)
-        self.smtp_port = getattr(settings, 'SMTP_PORT', 587)
-        self.smtp_user = getattr(settings, 'SMTP_USER', None)
-        self.smtp_password = getattr(settings, 'SMTP_PASSWORD', None)
-        self.smtp_from = getattr(settings, 'SMTP_FROM', 'Engarde AI <noreply@engarde.ai>')
+        self.smtp_host = settings.SMTP_HOST.strip()
+        self.smtp_port = settings.SMTP_PORT
+        self.smtp_user = settings.SMTP_USER.strip()
+        self.smtp_password = settings.SMTP_PASSWORD
+        self.smtp_from = settings.SMTP_FROM
+        self.frontend_public_url = settings.FRONTEND_PUBLIC_URL.rstrip("/")
         self.is_dev_mode = not self.smtp_host
+
+    def _build_frontend_url(self, path: str, query: Optional[dict[str, str]] = None) -> str:
+        normalized_path = path if path.startswith("/") else f"/{path}"
+        if query:
+            return f"{self.frontend_public_url}{normalized_path}?{urlencode(query)}"
+        return f"{self.frontend_public_url}{normalized_path}"
 
     def generate_verification_token(self) -> str:
         """Generate a secure verification token."""
@@ -23,22 +30,21 @@ class EmailService:
 
     def send_verification_email(self, email: str, token: str) -> bool:
         """Send email verification link to user."""
-        verification_url = f"http://localhost:3001/verify-email?token={token}"
+        verification_url = self._build_frontend_url("/verify-email", {"token": token})
 
-        subject = "Verify your Engarde AI account"
+        subject = "【Engarde AI】请验证你的邮箱"
         body = f"""
-Welcome to Engarde AI!
+欢迎注册 Engarde AI！
 
-Please verify your email address by clicking the link below:
+请点击下方链接完成邮箱验证：
 
 {verification_url}
 
-This link will expire in 24 hours.
+该链接 24 小时内有效。
 
-If you didn't create an account, please ignore this email.
+如果这不是你的操作，请忽略本邮件。
 
-Best regards,
-Engarde AI Team
+Engarde AI 团队
 """
 
         if self.is_dev_mode:
@@ -70,8 +76,16 @@ Engarde AI Team
 
             msg.attach(MIMEText(body, 'plain'))
 
-            server = smtplib.SMTP(self.smtp_host, self.smtp_port)
-            server.starttls()
+            if self.smtp_port == 465:
+                # Port 465 uses implicit TLS (SMTPS).
+                server = smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, timeout=20)
+            else:
+                # Other ports (for example 587) use explicit STARTTLS.
+                server = smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=20)
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+
             server.login(self.smtp_user, self.smtp_password)
             server.send_message(msg)
             server.quit()
@@ -96,7 +110,7 @@ You can now:
 - Get AI-powered technique feedback
 - Track your training progress
 
-Get started at: http://localhost:3001/analyze
+Get started at: {self._build_frontend_url('/analyze')}
 
 Best regards,
 Engarde AI Team
@@ -118,7 +132,7 @@ Engarde AI Team
 
     def send_password_reset_email(self, email: str, token: str) -> bool:
         """Send password reset link to user."""
-        reset_url = f"http://localhost:3001/reset-password?token={token}"
+        reset_url = self._build_frontend_url("/reset-password", {"token": token})
 
         subject = "Reset your Engarde AI password"
         body = f"""

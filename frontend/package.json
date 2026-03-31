@@ -1,12 +1,27 @@
 {
   "name": "fencing-ai-frontend",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint"
+  },
+  "browserslist": {
+    "production": [
+      "last 2 Chrome versions",
+      "last 2 Edge versions",
+      "last 2 Firefox versions",
+      "last 2 Safari versions",
+      "last 2 iOS versions",
+      "not dead"
+    ],
+    "development": [
+      "last 1 Chrome version",
+      "last 1 Firefox version",
+      "last 1 Safari version"
+    ]
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.0.2",
@@ -25,6 +40,7 @@
     "@types/node": "^20.11.0",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
+    "autoprefixer": "^10.4.27",
     "eslint": "^8.56.0",
     "eslint-config-next": "14.2.35",
     "postcss": "^8.4.33",

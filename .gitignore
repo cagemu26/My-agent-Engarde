@@ -28,10 +28,13 @@ build/
 
 # Environment
 .env
+.env.production
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
+backend/.env.production
+frontend/.env.production
 
 # IDE
 .vscode/
@@ -52,4 +55,13 @@ logs/
 
 # Local vector store
 backend/data/chroma/
+backend/data/db/
 backend/data/models/
+backend/data/videos/
+data/chroma/
+data/db/
+data/models/
+data/videos/
+data/test-video.mp4
+.playwright-cli/
+*.pid

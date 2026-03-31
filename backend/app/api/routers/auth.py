@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr
@@ -8,6 +8,7 @@ from app.core.database import get_db
 from app.core.security import get_password_hash, verify_password
 from app.core.auth import create_access_token, verify_token
 from app.core.config import settings
+from app.core.rate_limit import enforce_rate_limit, get_client_ip
 from app.models import User, InvitationCode
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -31,6 +32,11 @@ class AuthResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: dict
+
+
+class RegisterResponse(BaseModel):
+    success: bool
+    message: str
 
 
 class UserResponse(BaseModel):
@@ -77,15 +83,28 @@ def get_current_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User is inactive",
         )
+    require_verified = getattr(settings, "REQUIRE_EMAIL_VERIFICATION", False)
+    if require_verified and not user.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email is not verified",
+        )
     return user
 
 
-@router.post("/register", response_model=AuthResponse)
-def register(request: RegisterRequest, db: Session = Depends(get_db)):
+@router.post("/register", response_model=RegisterResponse)
+def register(payload: RegisterRequest, http_request: Request, db: Session = Depends(get_db)):
     """Register a new user with an invitation code."""
+    client_ip = get_client_ip(http_request)
+    enforce_rate_limit(
+        key=f"auth:register:ip:{client_ip}",
+        limit=settings.AUTH_REGISTER_IP_RATE_LIMIT,
+        window_seconds=settings.AUTH_REGISTER_WINDOW_SECONDS,
+    )
+
     # Verify invitation code
     invitation = db.query(InvitationCode).filter(
-        InvitationCode.code == request.invitation_code,
+        InvitationCode.code == payload.invitation_code,
         InvitationCode.is_active == True
     ).first()
 
@@ -102,7 +121,7 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
         )
 
     # Check if user already exists
-    existing_user = db.query(User).filter(User.email == request.email).first()
+    existing_user = db.query(User).filter(User.email == payload.email).first()
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -115,18 +134,25 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
 
     # Create new user (email not verified yet)
     user = User(
-        email=request.email,
-        username=request.username,
-        password_hash=get_password_hash(request.password),
+        email=payload.email,
+        username=payload.username,
+        password_hash=get_password_hash(payload.password),
         is_active=True,
         email_verified=False,
-        verification_token=verification_token
+        verification_token=verification_token,
+        verification_token_expires=datetime.utcnow() + timedelta(hours=settings.EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS),
     )
     db.add(user)
     db.flush()
 
     # Send verification email
-    email_service.send_verification_email(request.email, verification_token)
+    sent = email_service.send_verification_email(payload.email, verification_token)
+    if not sent:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send verification email, please try again"
+        )
 
     # Mark invitation as used
     invitation.used_by = user.id
@@ -134,29 +160,31 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
     invitation.is_active = False
     db.commit()
 
-    # Generate token
-    access_token = create_access_token(data={"sub": str(user.id)})
-
-    return AuthResponse(
-        access_token=access_token,
-        user={
-            "id": str(user.id),
-            "email": user.email,
-            "username": user.username,
-            "is_active": user.is_active,
-            "is_admin": user.is_admin,
-            "email_verified": user.email_verified,
-            "created_at": user.created_at.isoformat()
-        }
+    return RegisterResponse(
+        success=True,
+        message="Registration successful. Please verify your email before logging in."
     )
 
 
 @router.post("/login", response_model=AuthResponse)
-def login(request: LoginRequest, db: Session = Depends(get_db)):
+def login(payload: LoginRequest, http_request: Request, db: Session = Depends(get_db)):
     """Login with email and password."""
-    user = db.query(User).filter(User.email == request.email).first()
+    client_ip = get_client_ip(http_request)
+    email_key = payload.email.lower()
+    enforce_rate_limit(
+        key=f"auth:login:ip:{client_ip}",
+        limit=settings.AUTH_LOGIN_IP_RATE_LIMIT,
+        window_seconds=settings.AUTH_LOGIN_WINDOW_SECONDS,
+    )
+    enforce_rate_limit(
+        key=f"auth:login:email:{email_key}",
+        limit=settings.AUTH_LOGIN_EMAIL_RATE_LIMIT,
+        window_seconds=settings.AUTH_LOGIN_WINDOW_SECONDS,
+    )
 
-    if not user or not verify_password(request.password, user.password_hash):
+    user = db.query(User).filter(User.email == payload.email).first()
+
+    if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
@@ -186,6 +214,7 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
             "username": user.username,
             "is_active": user.is_active,
             "is_admin": user.is_admin,
+            "email_verified": user.email_verified,
             "created_at": user.created_at.isoformat()
         }
     )
@@ -242,15 +271,35 @@ class ResendVerificationResponse(BaseModel):
     message: str
 
 
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
+
+
 @router.get("/verify/{token}", response_model=VerifyEmailResponse)
-def verify_email(token: str, db: Session = Depends(get_db)):
+def verify_email(token: str, http_request: Request, db: Session = Depends(get_db)):
     """Verify user's email with the token."""
+    client_ip = get_client_ip(http_request)
+    enforce_rate_limit(
+        key=f"auth:verify:ip:{client_ip}",
+        limit=settings.AUTH_VERIFY_EMAIL_IP_RATE_LIMIT,
+        window_seconds=settings.AUTH_VERIFY_EMAIL_WINDOW_SECONDS,
+    )
+
     user = db.query(User).filter(User.verification_token == token).first()
 
     if not user:
         return VerifyEmailResponse(
             success=False,
             message="Invalid verification token"
+        )
+
+    if user.verification_token_expires and user.verification_token_expires < datetime.utcnow():
+        user.verification_token = None
+        user.verification_token_expires = None
+        db.commit()
+        return VerifyEmailResponse(
+            success=False,
+            message="Verification token has expired. Please request a new verification email."
         )
 
     if user.email_verified:
@@ -261,6 +310,7 @@ def verify_email(token: str, db: Session = Depends(get_db)):
 
     user.email_verified = True
     user.verification_token = None
+    user.verification_token_expires = None
     db.commit()
 
     # Send welcome email
@@ -275,41 +325,53 @@ def verify_email(token: str, db: Session = Depends(get_db)):
 
 @router.post("/resend-verification", response_model=ResendVerificationResponse)
 def resend_verification(
-    email: str,
-    current_user: User = Depends(get_current_user),
+    payload: ResendVerificationRequest,
+    http_request: Request,
     db: Session = Depends(get_db)
 ):
     """Resend verification email."""
-    # Check if user is requesting their own email
-    if current_user.email != email:
-        return ResendVerificationResponse(
-            success=False,
-            message="Email mismatch"
-        )
+    client_ip = get_client_ip(http_request)
+    email_key = payload.email.lower()
+    enforce_rate_limit(
+        key=f"auth:resend-verification:ip:{client_ip}",
+        limit=settings.AUTH_RESEND_VERIFICATION_IP_RATE_LIMIT,
+        window_seconds=settings.AUTH_RESEND_VERIFICATION_WINDOW_SECONDS,
+    )
+    enforce_rate_limit(
+        key=f"auth:resend-verification:email:{email_key}",
+        limit=settings.AUTH_RESEND_VERIFICATION_EMAIL_RATE_LIMIT,
+        window_seconds=settings.AUTH_RESEND_VERIFICATION_WINDOW_SECONDS,
+    )
 
-    if current_user.email_verified:
-        return ResendVerificationResponse(
-            success=True,
-            message="Email already verified"
-        )
+    generic_message = "If your account exists and is not verified, we sent a verification email."
+    user = db.query(User).filter(User.email == payload.email).first()
+    if not user:
+        return ResendVerificationResponse(success=True, message=generic_message)
+    if user.email_verified:
+        return ResendVerificationResponse(success=True, message=generic_message)
 
     # Generate new token
     from app.services.email import email_service
     token = email_service.generate_verification_token()
-    current_user.verification_token = token
-    db.commit()
+    user.verification_token = token
+    user.verification_token_expires = datetime.utcnow() + timedelta(hours=settings.EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS)
 
-    # Send verification email
-    email_service.send_verification_email(email, token)
+    sent = email_service.send_verification_email(user.email, token)
+    if not sent:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send verification email, please try again"
+        )
+    db.commit()
 
     return ResendVerificationResponse(
         success=True,
-        message="Verification email sent"
+        message=generic_message
     )
 
 
 # Password reset endpoints
-from datetime import datetime, timedelta
 
 class PasswordResetRequest(BaseModel):
     email: EmailStr
@@ -326,9 +388,22 @@ class PasswordResetConfirmRequest(BaseModel):
 
 
 @router.post("/password-reset", response_model=PasswordResetResponse)
-def request_password_reset(request: PasswordResetRequest, db: Session = Depends(get_db)):
+def request_password_reset(payload: PasswordResetRequest, http_request: Request, db: Session = Depends(get_db)):
     """Request a password reset email."""
-    user = db.query(User).filter(User.email == request.email).first()
+    client_ip = get_client_ip(http_request)
+    email_key = payload.email.lower()
+    enforce_rate_limit(
+        key=f"auth:password-reset:ip:{client_ip}",
+        limit=settings.AUTH_PASSWORD_RESET_IP_RATE_LIMIT,
+        window_seconds=settings.AUTH_PASSWORD_RESET_WINDOW_SECONDS,
+    )
+    enforce_rate_limit(
+        key=f"auth:password-reset:email:{email_key}",
+        limit=settings.AUTH_PASSWORD_RESET_EMAIL_RATE_LIMIT,
+        window_seconds=settings.AUTH_PASSWORD_RESET_WINDOW_SECONDS,
+    )
+
+    user = db.query(User).filter(User.email == payload.email).first()
 
     # Always return success to prevent email enumeration
     if user:
@@ -339,7 +414,7 @@ def request_password_reset(request: PasswordResetRequest, db: Session = Depends(
         db.commit()
 
         # Send password reset email
-        email_service.send_password_reset_email(request.email, token)
+        email_service.send_password_reset_email(payload.email, token)
 
     return PasswordResetResponse(
         success=True,
@@ -348,9 +423,16 @@ def request_password_reset(request: PasswordResetRequest, db: Session = Depends(
 
 
 @router.post("/password-reset/confirm", response_model=PasswordResetResponse)
-def confirm_password_reset(request: PasswordResetConfirmRequest, db: Session = Depends(get_db)):
+def confirm_password_reset(payload: PasswordResetConfirmRequest, http_request: Request, db: Session = Depends(get_db)):
     """Confirm password reset with new password."""
-    user = db.query(User).filter(User.reset_token == request.token).first()
+    client_ip = get_client_ip(http_request)
+    enforce_rate_limit(
+        key=f"auth:password-reset-confirm:ip:{client_ip}",
+        limit=settings.AUTH_PASSWORD_RESET_CONFIRM_IP_RATE_LIMIT,
+        window_seconds=settings.AUTH_PASSWORD_RESET_CONFIRM_WINDOW_SECONDS,
+    )
+
+    user = db.query(User).filter(User.reset_token == payload.token).first()
 
     if not user:
         return PasswordResetResponse(
@@ -358,14 +440,14 @@ def confirm_password_reset(request: PasswordResetConfirmRequest, db: Session = D
             message="Invalid or expired reset token"
         )
 
-    if user.reset_token_expires < datetime.utcnow():
+    if not user.reset_token_expires or user.reset_token_expires < datetime.utcnow():
         return PasswordResetResponse(
             success=False,
             message="Reset token has expired"
         )
 
     # Update password
-    user.password_hash = get_password_hash(request.new_password)
+    user.password_hash = get_password_hash(payload.new_password)
     user.reset_token = None
     user.reset_token_expires = None
     db.commit()

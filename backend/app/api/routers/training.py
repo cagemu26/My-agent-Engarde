@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.auth import verify_token
+from app.core.config import settings
 from app.core.database import get_db
 from app.models import TrainingLog, User
 
@@ -79,6 +80,12 @@ def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User is inactive",
+        )
+    require_verified = getattr(settings, "REQUIRE_EMAIL_VERIFICATION", False)
+    if require_verified and not user.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email is not verified",
         )
     return user
 

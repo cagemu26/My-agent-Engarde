@@ -29,6 +29,7 @@ from app.schemas import (
 from app.services.video import video_service
 from app.services.pose_analysis import pose_analysis_service
 from app.services.analysis_report import analysis_report_service
+from app.core.config import settings
 from app.core.database import get_db, SessionLocal
 from app.core.auth import verify_token
 from app.models import User, AnalysisReportJob, PoseAnalysisJob
@@ -83,6 +84,9 @@ def get_current_user_optional(
 
     user = db.query(User).filter(User.id == user_id).first()
     if user is None or not user.is_active:
+        return None
+    require_verified = getattr(settings, "REQUIRE_EMAIL_VERIFICATION", False)
+    if require_verified and not user.email_verified:
         return None
     return user
 

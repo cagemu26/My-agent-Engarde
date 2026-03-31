@@ -3,11 +3,12 @@ import json
 import logging
 from pathlib import Path
 import re
-from typing import Optional
+from typing import Any, AsyncIterator, Optional
 from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -69,6 +70,9 @@ def get_current_user_optional(
 
     user = db.query(User).filter(User.id == user_id).first()
     if user is None or not user.is_active:
+        return None
+    require_verified = getattr(settings, "REQUIRE_EMAIL_VERIFICATION", False)
+    if require_verified and not user.email_verified:
         return None
     return user
 
@@ -326,6 +330,169 @@ class LLMService:
             logger.exception("llm_exception detail=%s", str(e))
             return self._get_fallback_response(messages)
 
+    def _extract_stream_text_candidate(self, payload: dict[str, Any]) -> str:
+        choices = payload.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            if isinstance(first, dict):
+                delta = first.get("delta")
+                if isinstance(delta, dict):
+                    content = delta.get("content")
+                    if isinstance(content, str):
+                        return content
+                message = first.get("message")
+                if isinstance(message, dict):
+                    content = message.get("content")
+                    if isinstance(content, str):
+                        return content
+                text = first.get("text")
+                if isinstance(text, str):
+                    return text
+
+        for key in ("reply", "content", "text", "output_text"):
+            value = payload.get(key)
+            if isinstance(value, str):
+                return value
+
+        return ""
+
+    def _normalize_stream_delta(self, candidate: str, accumulated: str) -> str:
+        if not candidate:
+            return ""
+        if not accumulated:
+            return candidate
+        if candidate == accumulated:
+            return ""
+        if candidate.startswith(accumulated):
+            return candidate[len(accumulated):]
+        return candidate
+
+    async def chat_stream(
+        self,
+        messages: list[dict],
+        context: Optional[str] = None,
+        *,
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+        response_language_override: Optional[str] = None,
+    ) -> AsyncIterator[str]:
+        if not self.api_key:
+            yield self._get_fallback_response(messages)
+            return
+
+        sanitized_messages = self._sanitize_messages(messages)
+        clipped_context = self._clip_context(context)
+        normalized_override = (response_language_override or "").strip().lower()
+        if normalized_override in {"zh", "en", "auto"}:
+            preferred_language = normalized_override
+        else:
+            preferred_language = self._infer_response_language(sanitized_messages)
+
+        final_prompt = self._build_fencing_system_prompt(
+            clipped_context,
+            response_language=preferred_language,
+        )
+        api_messages = [{"role": "system", "content": final_prompt}]
+        api_messages.extend(sanitized_messages)
+
+        accumulated = ""
+        line_buffer: list[str] = []
+
+        try:
+            async with httpx.AsyncClient(timeout=LLM_REQUEST_TIMEOUT_SECONDS) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self.base_url}/text/chatcompletion_v2",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                        "Accept": "text/event-stream",
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": api_messages,
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "stream": True,
+                    },
+                ) as response:
+                    if response.status_code != 200:
+                        body_preview = (await response.aread()).decode("utf-8", errors="ignore")
+                        logger.warning(
+                            "llm_http_stream_error status_code=%s body=%s",
+                            response.status_code,
+                            body_preview[:800],
+                        )
+                        yield self._get_fallback_response(messages)
+                        return
+
+                    async for raw_line in response.aiter_lines():
+                        if raw_line is None:
+                            continue
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        line_buffer.append(line)
+
+                        if line.startswith("data:"):
+                            line = line[5:].strip()
+                        if not line or line == "[DONE]":
+                            continue
+
+                        try:
+                            payload = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+
+                        base_resp = payload.get("base_resp")
+                        if isinstance(base_resp, dict):
+                            status_code = int(base_resp.get("status_code") or 0)
+                            if status_code and status_code != 0:
+                                status_msg = str(base_resp.get("status_msg") or "")
+                                logger.warning(
+                                    "llm_stream_api_error status_code=%s status_msg=%s",
+                                    status_code,
+                                    status_msg,
+                                )
+                                if status_code == 1008:
+                                    if preferred_language == "zh":
+                                        yield "⚠️ AI 服务暂时不可用（API 余额不足）。请检查你的 MiniMax 账户余额。"
+                                    else:
+                                        yield "⚠️ AI service temporarily unavailable (insufficient API balance). Please check your MiniMax account balance."
+                                    return
+                                continue
+
+                        candidate = self._extract_stream_text_candidate(payload)
+                        delta = self._normalize_stream_delta(candidate, accumulated)
+                        if not delta:
+                            continue
+                        accumulated += delta
+                        yield delta
+
+                    if accumulated:
+                        return
+
+                    # Some providers may ignore stream=true and still return one JSON payload.
+                    merged = "\n".join(line_buffer)
+                    fallback_payload_line = merged
+                    if fallback_payload_line.startswith("data:"):
+                        fallback_payload_line = fallback_payload_line[5:].strip()
+                    try:
+                        fallback_payload = json.loads(fallback_payload_line)
+                    except json.JSONDecodeError:
+                        yield self._get_fallback_response(messages)
+                        return
+
+                    candidate = self._extract_stream_text_candidate(fallback_payload)
+                    if candidate:
+                        yield candidate
+                        return
+
+                    yield self._get_fallback_response(messages)
+        except Exception as exc:
+            logger.exception("llm_stream_exception detail=%s", str(exc))
+            yield self._get_fallback_response(messages)
+
     def _clip_context(self, context: Optional[str]) -> Optional[str]:
         if not context:
             return context
@@ -468,6 +635,130 @@ What would you like to know more about?"""
 
 
 llm_service = LLMService()
+
+
+def _build_sse_event(event: str, payload: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+
+
+async def _prepare_chat_turn(
+    request: ChatRequest,
+    *,
+    current_user: Optional[User],
+    db: Session,
+) -> tuple[str, list[dict[str, str]], Optional[ChatSession], Optional[str], list[dict[str, Any]], Optional[dict[str, Any]]]:
+    user_message = _extract_user_message(request)
+    model_messages = [{"role": msg.role, "content": msg.content} for msg in request.messages]
+
+    active_session: Optional[ChatSession] = None
+    normalized_session_id = _clean_optional_text(request.session_id, 64)
+    if normalized_session_id:
+        if current_user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required for persisted chat sessions",
+            )
+        if not user_message:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="message is required when session_id is provided",
+            )
+
+        active_session = _get_session_for_user(db, current_user, normalized_session_id)
+        history_rows = (
+            db.query(ChatMessageModel)
+            .filter(ChatMessageModel.session_id == active_session.id)
+            .order_by(ChatMessageModel.created_at.desc())
+            .limit(MAX_SESSION_HISTORY_MESSAGES)
+            .all()
+        )
+        history_rows.reverse()
+        history_messages = [{"role": row.role, "content": row.content} for row in history_rows]
+        model_messages = [*history_messages, {"role": "user", "content": user_message}]
+    elif not model_messages and user_message:
+        model_messages = [{"role": "user", "content": user_message}]
+
+    if not model_messages:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No messages provided",
+        )
+
+    response_context = request.context
+    citations_payload: list[dict[str, Any]] = []
+    retrieval_meta_payload: Optional[dict[str, Any]] = None
+
+    if request.use_kb:
+        user_query = user_message
+        if not user_query:
+            for message in reversed(model_messages):
+                if message.get("role") == "user" and str(message.get("content", "")).strip():
+                    user_query = str(message.get("content", "")).strip()
+                    break
+
+        kb_filters = request.kb_filters.model_dump(exclude_none=True) if request.kb_filters else {}
+        response_context, citations_payload, retrieval_meta_payload = await rag_service.prepare_chat_context(
+            user_query=user_query,
+            base_context=request.context,
+            use_kb=request.use_kb,
+            weapon=request.weapon,
+            kb_filters=kb_filters,
+        )
+
+    return (
+        user_message,
+        model_messages,
+        active_session,
+        response_context,
+        citations_payload,
+        retrieval_meta_payload,
+    )
+
+
+def _persist_chat_turn(
+    *,
+    db: Session,
+    request: ChatRequest,
+    active_session: Optional[ChatSession],
+    current_user: Optional[User],
+    user_message: str,
+    assistant_response: str,
+    citations_payload: list[dict[str, Any]],
+    retrieval_meta_payload: Optional[dict[str, Any]],
+) -> None:
+    if not active_session or not current_user:
+        return
+
+    if user_message:
+        db.add(
+            ChatMessageModel(
+                session_id=active_session.id,
+                user_id=current_user.id,
+                role="user",
+                content=user_message,
+            )
+        )
+
+    assistant_message = ChatMessageModel(
+        session_id=active_session.id,
+        user_id=current_user.id,
+        role="assistant",
+        content=assistant_response,
+        citations_json=json.dumps(citations_payload, ensure_ascii=False) if citations_payload else None,
+        retrieval_meta_json=(
+            json.dumps(retrieval_meta_payload, ensure_ascii=False) if retrieval_meta_payload else None
+        ),
+    )
+    db.add(assistant_message)
+
+    normalized_context_summary = _clean_optional_text(request.context, MAX_CONTEXT_SUMMARY_CHARS)
+    if normalized_context_summary:
+        active_session.context_summary = normalized_context_summary
+
+    now = datetime.utcnow()
+    active_session.last_message_at = now
+    active_session.updated_at = now
+    db.commit()
 
 
 @router.post("/chat/sessions", response_model=ChatSessionResponse)
@@ -690,104 +981,120 @@ async def chat(
     """
     AI Chat endpoint for fencing questions
     """
-    user_message = _extract_user_message(request)
-    model_messages = [{"role": msg.role, "content": msg.content} for msg in request.messages]
+    (
+        user_message,
+        model_messages,
+        active_session,
+        response_context,
+        citations_payload,
+        retrieval_meta_payload,
+    ) = await _prepare_chat_turn(
+        request,
+        current_user=current_user,
+        db=db,
+    )
 
-    active_session: Optional[ChatSession] = None
-    normalized_session_id = _clean_optional_text(request.session_id, 64)
-    if normalized_session_id:
-        if current_user is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Authentication required for persisted chat sessions",
-            )
-        if not user_message:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="message is required when session_id is provided",
-            )
-
-        active_session = _get_session_for_user(db, current_user, normalized_session_id)
-        history_rows = (
-            db.query(ChatMessageModel)
-            .filter(ChatMessageModel.session_id == active_session.id)
-            .order_by(ChatMessageModel.created_at.desc())
-            .limit(MAX_SESSION_HISTORY_MESSAGES)
-            .all()
-        )
-        history_rows.reverse()
-        history_messages = [{"role": row.role, "content": row.content} for row in history_rows]
-        model_messages = [*history_messages, {"role": "user", "content": user_message}]
-    elif not model_messages and user_message:
-        model_messages = [{"role": "user", "content": user_message}]
-
-    if not model_messages:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No messages provided",
-        )
-
-    response_context = request.context
-    citations_payload: list[dict] = []
-    retrieval_meta_payload: Optional[dict] = None
-
-    if request.use_kb:
-        user_query = user_message
-        if not user_query:
-            for message in reversed(model_messages):
-                if message.get("role") == "user" and str(message.get("content", "")).strip():
-                    user_query = str(message.get("content", "")).strip()
-                    break
-
-        kb_filters = request.kb_filters.model_dump(exclude_none=True) if request.kb_filters else {}
-        response_context, citations_payload, retrieval_meta_payload = await rag_service.prepare_chat_context(
-            user_query=user_query,
-            base_context=request.context,
-            use_kb=request.use_kb,
-            weapon=request.weapon,
-            kb_filters=kb_filters,
-        )
-
-    response = await llm_service.chat(model_messages, context=response_context)
+    response = await llm_service.chat(
+        model_messages,
+        context=response_context,
+    )
 
     citations = [Citation(**item) for item in citations_payload] if request.use_kb else None
     retrieval_meta = RetrievalMeta(**retrieval_meta_payload) if retrieval_meta_payload else None
 
-    if active_session and current_user:
-        if user_message:
-            db.add(
-                ChatMessageModel(
-                    session_id=active_session.id,
-                    user_id=current_user.id,
-                    role="user",
-                    content=user_message,
-                )
-            )
-
-        assistant_message = ChatMessageModel(
-            session_id=active_session.id,
-            user_id=current_user.id,
-            role="assistant",
-            content=response,
-            citations_json=json.dumps(citations_payload, ensure_ascii=False) if citations_payload else None,
-            retrieval_meta_json=(
-                json.dumps(retrieval_meta_payload, ensure_ascii=False) if retrieval_meta_payload else None
-            ),
-        )
-        db.add(assistant_message)
-
-        normalized_context_summary = _clean_optional_text(request.context, MAX_CONTEXT_SUMMARY_CHARS)
-        if normalized_context_summary:
-            active_session.context_summary = normalized_context_summary
-
-        now = datetime.utcnow()
-        active_session.last_message_at = now
-        active_session.updated_at = now
-        db.commit()
+    _persist_chat_turn(
+        db=db,
+        request=request,
+        active_session=active_session,
+        current_user=current_user,
+        user_message=user_message,
+        assistant_response=response,
+        citations_payload=citations_payload,
+        retrieval_meta_payload=retrieval_meta_payload,
+    )
 
     return ChatResponse(
         message=response,
         session_id=str(active_session.id) if active_session else None,
         citations=citations,
         retrieval_meta=retrieval_meta,
+    )
+
+
+@router.post("/chat/stream")
+async def chat_stream(
+    request: ChatRequest,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
+):
+    (
+        user_message,
+        model_messages,
+        active_session,
+        response_context,
+        citations_payload,
+        retrieval_meta_payload,
+    ) = await _prepare_chat_turn(
+        request,
+        current_user=current_user,
+        db=db,
+    )
+
+    async def event_generator() -> AsyncIterator[str]:
+        session_id_value = str(active_session.id) if active_session else None
+        yield _build_sse_event("meta", {"session_id": session_id_value})
+
+        full_response = ""
+        try:
+            async for delta in llm_service.chat_stream(
+                model_messages,
+                context=response_context,
+            ):
+                if not delta:
+                    continue
+                full_response += delta
+                yield _build_sse_event("chunk", {"delta": delta})
+
+            if not full_response.strip():
+                full_response = llm_service._get_fallback_response(model_messages)
+                yield _build_sse_event("chunk", {"delta": full_response})
+
+            citations = [Citation(**item) for item in citations_payload] if request.use_kb else None
+            retrieval_meta = RetrievalMeta(**retrieval_meta_payload) if retrieval_meta_payload else None
+
+            _persist_chat_turn(
+                db=db,
+                request=request,
+                active_session=active_session,
+                current_user=current_user,
+                user_message=user_message,
+                assistant_response=full_response,
+                citations_payload=citations_payload,
+                retrieval_meta_payload=retrieval_meta_payload,
+            )
+
+            yield _build_sse_event(
+                "done",
+                {
+                    "message": full_response,
+                    "session_id": session_id_value,
+                    "citations": [item.model_dump() for item in citations] if citations else None,
+                    "retrieval_meta": retrieval_meta.model_dump() if retrieval_meta else None,
+                },
+            )
+        except Exception as exc:
+            logger.exception("chat_stream_error detail=%s", str(exc))
+            yield _build_sse_event(
+                "error",
+                {"message": "Failed to stream response"},
+            )
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
