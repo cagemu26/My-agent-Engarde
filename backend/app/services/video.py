@@ -153,7 +153,19 @@ File analyzed: {video_path}"""
         Returns:
             str or None: The file path if found
         """
-        # Search for file with this ID prefix
+        metadata = self.get_video_metadata(video_id) or {}
+
+        preferred_path = metadata.get("file_path")
+        if preferred_path and Path(preferred_path).exists():
+            return str(Path(preferred_path))
+
+        filename = metadata.get("filename")
+        if filename:
+            candidate = self.upload_dir / filename
+            if candidate.exists():
+                return str(candidate)
+
+        # Fallback: search for file with this ID prefix.
         for file_path in self.upload_dir.iterdir():
             if file_path.stem == video_id:
                 return str(file_path)

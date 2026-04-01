@@ -1,4 +1,5 @@
 export type AthleteSlot = "left" | "right";
+export type PoseDataStatus = "ready" | "insufficient_data";
 
 export interface PoseLandmarkObject {
   name?: string;
@@ -60,6 +61,11 @@ export interface PoseData {
     processed_frames?: number;
     total_frames?: number;
     selected_athlete_slot?: AthleteSlot;
+    selected_athlete_track_id?: string;
+    data_status?: PoseDataStatus | string;
+    effective_frames?: number;
+    min_required_frames?: number;
+    available_slots?: string[];
   };
 }
 
@@ -122,6 +128,65 @@ export function getDefaultAthleteSlot(poseData: PoseData | null | undefined): At
   if (availableSlots.includes("left")) return "left";
   if (availableSlots.includes("right")) return "right";
   return "left";
+}
+
+export function isPoseDataInsufficient(poseData: PoseData | null | undefined): boolean {
+  if (!poseData) return false;
+
+  if (poseData.processing?.data_status === "insufficient_data") {
+    return true;
+  }
+
+  const effectiveFrames = poseData.processing?.effective_frames;
+  const minRequiredFrames = poseData.processing?.min_required_frames;
+  if (
+    typeof effectiveFrames === "number" &&
+    typeof minRequiredFrames === "number" &&
+    effectiveFrames < minRequiredFrames
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+export function isPoseDataReadyForReport(poseData: PoseData | null | undefined): boolean {
+  if (!poseData || isPoseDataInsufficient(poseData)) {
+    return false;
+  }
+
+  const effectiveFrames = poseData.processing?.effective_frames;
+  if (typeof effectiveFrames === "number") {
+    return effectiveFrames > 0;
+  }
+
+  return (poseData.pose_sequence?.length ?? 0) > 0;
+}
+
+export function getPoseDataAvailabilityMessage(poseData: PoseData | null | undefined): string {
+  if (!poseData) {
+    return "No pose data available. Run pose analysis first.";
+  }
+
+  const effectiveFrames = poseData.processing?.effective_frames;
+  const minRequiredFrames = poseData.processing?.min_required_frames;
+  const processedFrames = poseData.processing?.processed_frames;
+
+  if (isPoseDataInsufficient(poseData)) {
+    if (typeof effectiveFrames === "number" && typeof minRequiredFrames === "number") {
+      if (effectiveFrames <= 0) {
+        return "Pose analysis completed, but no usable athlete frames were detected in this video.";
+      }
+      return `Pose analysis completed, but only ${effectiveFrames} effective frames were found. At least ${minRequiredFrames} are required to generate a report.`;
+    }
+    return "Pose analysis completed, but the detected athlete data is not sufficient to generate a report.";
+  }
+
+  if (typeof processedFrames === "number" && processedFrames <= 0) {
+    return "Pose analysis completed, but no usable athlete frames were detected in this video.";
+  }
+
+  return "No pose data available. Run pose analysis first.";
 }
 
 export function getFrameAthlete(

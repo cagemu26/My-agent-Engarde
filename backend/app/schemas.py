@@ -78,6 +78,10 @@ class ChatSessionCreateRequest(BaseModel):
     force_new: bool = False
 
 
+class ChatSessionAssistantNoteRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=6000)
+
+
 class ChatSessionMessageResponse(BaseModel):
     id: str
     role: str

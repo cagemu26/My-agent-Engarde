@@ -97,39 +97,6 @@ Engarde AI 团队
             print(f"❌ Failed to send email: {e}")
             return False
 
-    def send_welcome_email(self, email: str, username: str) -> bool:
-        """Send welcome email after verification."""
-        subject = "Welcome to Engarde AI!"
-        body = f"""
-Hi {username}!
-
-Your email has been verified. Welcome to Engarde AI!
-
-You can now:
-- Upload and analyze your fencing videos
-- Get AI-powered technique feedback
-- Track your training progress
-
-Get started at: {self._build_frontend_url('/analyze')}
-
-Best regards,
-Engarde AI Team
-"""
-
-        if self.is_dev_mode:
-            print("\n" + "=" * 50)
-            print("📧 WELCOME EMAIL (DEV MODE)")
-            print("=" * 50)
-            print(f"To: {email}")
-            print(f"Subject: {subject}")
-            print("-" * 50)
-            print(body)
-            print("=" * 50 + "\n")
-            return True
-
-        return self._send_smtp_email(email, subject, body)
-
-
     def send_password_reset_email(self, email: str, token: str) -> bool:
         """Send password reset link to user."""
         reset_url = self._build_frontend_url("/reset-password", {"token": token})

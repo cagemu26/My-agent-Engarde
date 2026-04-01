@@ -20,7 +20,11 @@ export default function AdminPage() {
 
   useEffect(() => {
     if (!isLoading && !user) {
-      router.push("/login");
+      router.replace("/login");
+      return;
+    }
+    if (!isLoading && user && !user.is_admin) {
+      router.replace("/");
     }
   }, [user, isLoading, router]);
 
@@ -32,7 +36,7 @@ export default function AdminPage() {
     );
   }
 
-  if (!user) {
+  if (!user || !user.is_admin) {
     return null;
   }
 

@@ -20,6 +20,7 @@ from app.models import AnalysisReport, ChatMessage as ChatMessageModel, ChatSess
 from app.schemas import (
     ChatRequest,
     ChatResponse,
+    ChatSessionAssistantNoteRequest,
     ChatSessionCreateRequest,
     ChatSessionDeleteResponse,
     ChatSessionDetailResponse,
@@ -897,6 +898,54 @@ def get_chat_session(
         **base.model_dump(),
         messages=[_serialize_session_message(item) for item in messages],
     )
+
+
+@router.post(
+    "/chat/sessions/{session_id}/assistant-note",
+    response_model=ChatSessionMessageResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def append_chat_session_assistant_note(
+    session_id: str,
+    request: ChatSessionAssistantNoteRequest,
+    current_user: User = Depends(get_current_user_required),
+    db: Session = Depends(get_db),
+):
+    chat_session = _get_session_for_user(db, current_user, session_id)
+    note_content = _clean_optional_text(request.content, MAX_SINGLE_MESSAGE_CHARS)
+    if not note_content:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="content is required",
+        )
+
+    existing_note = (
+        db.query(ChatMessageModel)
+        .filter(
+            ChatMessageModel.session_id == chat_session.id,
+            ChatMessageModel.role == "assistant",
+            ChatMessageModel.content == note_content,
+        )
+        .order_by(ChatMessageModel.created_at.desc())
+        .first()
+    )
+    if existing_note:
+        return _serialize_session_message(existing_note)
+
+    assistant_message = ChatMessageModel(
+        session_id=chat_session.id,
+        user_id=current_user.id,
+        role="assistant",
+        content=note_content,
+    )
+    db.add(assistant_message)
+
+    now = datetime.utcnow()
+    chat_session.last_message_at = now
+    chat_session.updated_at = now
+    db.commit()
+    db.refresh(assistant_message)
+    return _serialize_session_message(assistant_message)
 
 
 @router.delete("/chat/sessions/{session_id}", response_model=ChatSessionDeleteResponse)

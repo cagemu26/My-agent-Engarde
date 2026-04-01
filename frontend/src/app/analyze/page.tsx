@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useState, useRef, useCallback, useEffect, useMemo } from "react";
+import { Suspense, useState, useRef, useCallback, useEffect, useMemo, startTransition } from "react";
 import {
   ANALYSIS_REPORT_UPDATED_EVENT,
   clearCachedAnalysisReports,
@@ -27,12 +27,14 @@ import {
   normalizeSessionType,
 } from "@/lib/chat-session";
 import {
+  getPoseDataAvailabilityMessage,
   getAthleteSlotLabel,
   getAthleteSlotShortLabel,
   getAvailableAthleteSlots,
   getDefaultAthleteSlot,
   getSlotPoseFrames,
   hasDualAthletePose,
+  isPoseDataReadyForReport,
   type AthleteSlot,
   type PoseData,
 } from "@/lib/pose-data";
@@ -218,6 +220,8 @@ const DEFAULT_QUICK_PROMPTS = [
   "How to defend against attacks?",
   "What is a good weekly training routine?",
 ];
+
+const ANALYSIS_COMPLETION_NOTICE = "分析已完成。可前往历史详情页面查看分析细节，再回来继续提问。";
 
 const KEY_POINT_INDEXES: Record<string, number> = {
   nose: 0,
@@ -434,6 +438,7 @@ function AnalyzeContent() {
   const [selectedHistoryAthleteSlot, setSelectedHistoryAthleteSlot] = useState<AthleteSlot>("left");
   const [historyReport, setHistoryReport] = useState<AnalysisReportRecord | null>(null);
   const [historyDetailLoading, setHistoryDetailLoading] = useState(false);
+  const [historyPoseLoading, setHistoryPoseLoading] = useState(false);
   const [historyDetailError, setHistoryDetailError] = useState<string | null>(null);
   const [historyReportLoading, setHistoryReportLoading] = useState(false);
   const [historyReportAction, setHistoryReportAction] = useState<"load" | "generate" | null>(null);
@@ -483,6 +488,14 @@ function AnalyzeContent() {
   );
   const hasDualHistoryAthletes = useMemo(
     () => hasDualAthletePose(historyPoseData),
+    [historyPoseData],
+  );
+  const historyPoseReadyForReport = useMemo(
+    () => isPoseDataReadyForReport(historyPoseData),
+    [historyPoseData],
+  );
+  const historyPoseAvailabilityMessage = useMemo(
+    () => getPoseDataAvailabilityMessage(historyPoseData),
     [historyPoseData],
   );
 
@@ -949,7 +962,7 @@ function AnalyzeContent() {
           }
 
           try {
-            if (pose) {
+            if (pose && isPoseDataReadyForReport(pose)) {
               report = await ensureAnalysisReport<AnalysisReportRecord>(detail.video_id, {
                 athleteSlot: getDefaultAthleteSlot(pose),
                 generateIfMissing: false,
@@ -971,6 +984,7 @@ function AnalyzeContent() {
           setSelectedHistoryAthleteSlot(contextAthleteSlot);
           setHistoryReport(contextData.report);
           setHistoryDetailLoading(false);
+          setHistoryPoseLoading(false);
           setHistoryReportLoading(false);
           setHistoryReportAction(null);
           setHistoryDetailError(null);
@@ -1008,6 +1022,7 @@ function AnalyzeContent() {
           setHistoryPoseData(null);
           setHistoryReport(null);
           setHistoryDetailLoading(false);
+          setHistoryPoseLoading(false);
           setHistoryReportLoading(false);
           setHistoryReportAction(null);
           setHistoryDetailError(null);
@@ -1124,6 +1139,7 @@ function AnalyzeContent() {
       setHistoryDetail(null);
       setHistoryPoseData(null);
       setHistoryReport(null);
+      setHistoryPoseLoading(false);
       setHistoryDetailError(null);
       setHistoryReportError(null);
       setExternalContextPayload(null);
@@ -1227,7 +1243,7 @@ function AnalyzeContent() {
       }
 
       try {
-        if (pose) {
+        if (pose && isPoseDataReadyForReport(pose)) {
           const resolvedSlot = athleteSlot ?? getDefaultAthleteSlot(pose);
           report = await ensureAnalysisReport<AnalysisReportRecord>(videoId, {
             athleteSlot: resolvedSlot,
@@ -1252,20 +1268,78 @@ function AnalyzeContent() {
       historyDetailRequestRef.current = requestId;
       try {
         setHistoryDetailLoading(true);
+        setHistoryPoseLoading(false);
         setHistoryDetailError(null);
         setHistoryReportError(null);
         setHistoryReport(readCachedAnalysisReport<AnalysisReportRecord>(videoId, athleteSlot));
+        setHistoryPoseData(null);
+        setHistoryReportLoading(false);
+        setHistoryReportAction(null);
 
-        const contextData = await fetchVideoContextData(videoId, athleteSlot);
+        const videoResponse = await authFetch(`/video/${videoId}`);
+        if (!videoResponse.ok) {
+          throw new Error("Failed to fetch video details");
+        }
+        const video = (await videoResponse.json()) as HistoryItem;
         if (requestId !== historyDetailRequestRef.current) {
           return null;
         }
-        const resolvedSlot = athleteSlot ?? getDefaultAthleteSlot(contextData.pose);
-        setHistoryDetail(contextData.video);
-        setHistoryPoseData(contextData.pose);
-        setSelectedHistoryAthleteSlot(resolvedSlot);
-        setHistoryReport(contextData.report);
-        return contextData;
+        setHistoryDetail(video);
+        setHistoryDetailLoading(false);
+        setHistoryPoseLoading(true);
+
+        let pose: PoseData | null = null;
+        try {
+          const poseResponse = await authFetch(`/video/${videoId}/pose-data`);
+          if (poseResponse.ok) {
+            pose = (await poseResponse.json()) as PoseData;
+          }
+        } catch {
+          pose = null;
+        }
+        if (requestId !== historyDetailRequestRef.current) {
+          return null;
+        }
+
+        let report = readCachedAnalysisReport<AnalysisReportRecord>(videoId, athleteSlot);
+        if (pose && isPoseDataReadyForReport(pose)) {
+          const resolvedSlot = athleteSlot ?? getDefaultAthleteSlot(pose);
+          startTransition(() => {
+            setHistoryPoseData(pose);
+            setSelectedHistoryAthleteSlot(resolvedSlot);
+          });
+
+          setHistoryReportLoading(true);
+          setHistoryReportAction("load");
+          try {
+            report = await ensureAnalysisReport<AnalysisReportRecord>(videoId, {
+              athleteSlot: resolvedSlot,
+              generateIfMissing: false,
+            });
+          } catch (err) {
+            report = report ?? null;
+            if (requestId === historyDetailRequestRef.current) {
+              setHistoryReportError(err instanceof Error ? err.message : "Failed to load report");
+            }
+          } finally {
+            if (requestId === historyDetailRequestRef.current) {
+              setHistoryReportLoading(false);
+              setHistoryReportAction(null);
+            }
+          }
+        } else {
+          startTransition(() => {
+            setHistoryPoseData(pose);
+            setSelectedHistoryAthleteSlot(pose ? getDefaultAthleteSlot(pose) : "left");
+          });
+          setHistoryReport(null);
+        }
+
+        if (requestId !== historyDetailRequestRef.current) {
+          return null;
+        }
+        setHistoryReport(report ?? null);
+        return { video, pose, report: report ?? null };
       } catch (err) {
         if (requestId !== historyDetailRequestRef.current) {
           return null;
@@ -1279,14 +1353,23 @@ function AnalyzeContent() {
       } finally {
         if (requestId === historyDetailRequestRef.current) {
           setHistoryDetailLoading(false);
+          setHistoryPoseLoading(false);
         }
       }
     },
-    [fetchVideoContextData],
+    [],
   );
 
   useEffect(() => {
     if (!selectedHistoryVideoId || !historyPoseData) {
+      return;
+    }
+
+    if (!isPoseDataReadyForReport(historyPoseData)) {
+      setHistoryReport(null);
+      setHistoryReportLoading(false);
+      setHistoryReportAction(null);
+      setHistoryReportError(null);
       return;
     }
 
@@ -1408,7 +1491,6 @@ function AnalyzeContent() {
         forceNewSession?: boolean;
         switchToChat?: boolean;
         reportText?: string;
-        completionNotice?: string;
         preloaded?: { video: HistoryItem; pose: PoseData | null; report: AnalysisReportRecord | null } | null;
       },
     ) => {
@@ -1484,16 +1566,6 @@ function AnalyzeContent() {
           );
           nextMessages = [{ role: "assistant", content: handoffMessage }];
           nextNeedsFullContext = true;
-        }
-
-        if (options?.completionNotice) {
-          const noticeMessage = options.completionNotice.trim();
-          if (noticeMessage) {
-            nextMessages = [
-              ...nextMessages,
-              { role: "assistant", content: noticeMessage },
-            ];
-          }
         }
 
         setMessages(nextMessages);
@@ -1622,6 +1694,7 @@ function AnalyzeContent() {
       setHistoryPoseData(null);
       setHistoryReport(null);
       setHistoryDetailLoading(false);
+      setHistoryPoseLoading(false);
       setHistoryReportLoading(false);
       setHistoryReportAction(null);
       setHistoryDetailError(null);
@@ -1821,6 +1894,7 @@ function AnalyzeContent() {
     setHistoryPoseData(null);
     setHistoryReport(null);
     setHistoryDetailLoading(false);
+    setHistoryPoseLoading(false);
     setHistoryReportLoading(false);
     setHistoryReportAction(null);
     setHistoryDetailError(null);
@@ -1843,6 +1917,10 @@ function AnalyzeContent() {
 
   const handleGenerateHistoryReport = useCallback(async () => {
     if (!selectedHistoryVideoId) return;
+    if (!historyPoseReadyForReport) {
+      setHistoryReportError(historyPoseAvailabilityMessage);
+      return;
+    }
 
     try {
       setHistoryReportLoading(true);
@@ -1876,7 +1954,14 @@ function AnalyzeContent() {
       setHistoryReportLoading(false);
       setHistoryReportAction(null);
     }
-  }, [activeChatVideoId, historyReport, selectedHistoryAthleteSlot, selectedHistoryVideoId]);
+  }, [
+    activeChatVideoId,
+    historyPoseAvailabilityMessage,
+    historyPoseReadyForReport,
+    historyReport,
+    selectedHistoryAthleteSlot,
+    selectedHistoryVideoId,
+  ]);
 
   const handleAskAiAboutHistory = useCallback(() => {
     if (!historyDetail) return;
@@ -1993,6 +2078,59 @@ function AnalyzeContent() {
     selectedHistoryVideoId,
   ]);
 
+  const appendAnalysisCompletionNotice = useCallback(
+    async (videoId: string) => {
+      const normalizedVideoId = videoId.trim();
+      if (!normalizedVideoId) return;
+
+      try {
+        let sessionId: string | null =
+          activeChatVideoId === normalizedVideoId ? activeChatSessionId : null;
+
+        if (!sessionId) {
+          const query = new URLSearchParams({
+            limit: "1",
+            session_type: SESSION_TYPE_VIDEO,
+            video_id: normalizedVideoId,
+          });
+          const listResponse = await authFetch(`/chat/sessions?${query.toString()}`);
+          if (listResponse.ok) {
+            const listData = (await listResponse.json()) as { sessions?: ChatSessionRecord[] };
+            sessionId = listData.sessions?.[0]?.id || null;
+          }
+        }
+
+        if (!sessionId) return;
+
+        const response = await authFetch(`/chat/sessions/${sessionId}/assistant-note`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: ANALYSIS_COMPLETION_NOTICE }),
+        });
+        if (!response.ok) return;
+
+        const persisted = (await response.json()) as ChatSessionMessageRecord;
+        const noticeText = persisted.content?.trim() || ANALYSIS_COMPLETION_NOTICE;
+        if (!noticeText) return;
+
+        if (activeChatSessionId === sessionId) {
+          setMessages((prev) => {
+            const alreadyExists = prev.some(
+              (item) => item.role === "assistant" && item.content.trim() === noticeText,
+            );
+            if (alreadyExists) return prev;
+            return [...prev, { role: "assistant", content: noticeText }];
+          });
+        }
+
+        void fetchChatSessions({ silent: true });
+      } catch (err) {
+        console.error("Failed to append analysis completion notice:", err);
+      }
+    },
+    [activeChatSessionId, activeChatVideoId, fetchChatSessions],
+  );
+
   const handleUpload = async () => {
     if (!videoFile) return;
 
@@ -2025,6 +2163,7 @@ function AnalyzeContent() {
       startProcessingProgress();
 
       let reportMessage = "";
+      let shouldNotifyCompletion = false;
 
       if (analysisMode === "pose") {
         const poseJob = await startPoseAnalysisJob(uploadData.video_id);
@@ -2085,6 +2224,7 @@ function AnalyzeContent() {
                 ? { ...prev, status: "complete", progress: 100 }
                 : prev,
             );
+            await appendAnalysisCompletionNotice(uploadData.video_id);
             void fetchHistoryVideos();
           } catch (poseError) {
             console.error("Pose analysis background job failed:", poseError);
@@ -2118,6 +2258,7 @@ function AnalyzeContent() {
             prev ? { ...prev, progress: Math.max(prev.progress, 92) } : null,
           );
           reportMessage = "Analysis complete. Ready to coach this video with contextual Q&A.";
+          shouldNotifyCompletion = true;
         }
       }
 
@@ -2132,10 +2273,11 @@ function AnalyzeContent() {
         forceNewSession: true,
         switchToChat: true,
         reportText: reportMessage,
-        completionNotice:
-          "分析已完成。可前往历史详情页面查看分析细节，再回来继续提问。",
         preloaded,
       });
+      if (shouldNotifyCompletion) {
+        await appendAnalysisCompletionNotice(uploadData.video_id);
+      }
       void fetchHistoryVideos();
     } catch (error) {
       console.error("Upload error:", error);
@@ -2453,6 +2595,7 @@ function AnalyzeContent() {
     setHistoryPoseData(null);
     setHistoryReport(null);
     setHistoryDetailLoading(false);
+    setHistoryPoseLoading(false);
     setHistoryReportLoading(false);
     setHistoryReportAction(null);
     setHistoryDetailError(null);
@@ -2513,6 +2656,7 @@ function AnalyzeContent() {
           setHistoryDetail(null);
           setHistoryPoseData(null);
           setHistoryReport(null);
+          setHistoryPoseLoading(false);
           setHistoryDetailError(null);
           setHistoryReportError(null);
         }
@@ -3679,6 +3823,13 @@ function AnalyzeContent() {
                           </div>
                         </div>
 
+                        {historyPoseLoading && !historyPoseData && (
+                          <div className="flex items-center gap-3 rounded-xl border border-border bg-card p-4">
+                            <div className="h-5 w-5 animate-spin rounded-full border-2 border-red-500 border-t-transparent" />
+                            <p className="text-sm text-muted-foreground">Loading pose analysis...</p>
+                          </div>
+                        )}
+
                         {historyReportLoading && (
                           <div className="flex items-center gap-3 rounded-xl border border-border bg-card p-4">
                             <div className="h-5 w-5 animate-spin rounded-full border-2 border-red-500 border-t-transparent" />
@@ -3723,13 +3874,29 @@ function AnalyzeContent() {
                           </div>
                         )}
 
-                        {!historyReport && !historyReportLoading && !historyReportError && !historyPoseData && (
+                        {!historyReport && !historyPoseLoading && !historyReportLoading && !historyReportError && !historyPoseData && (
                           <div className="rounded-xl border border-border bg-muted/40 p-4 text-sm text-muted-foreground">
                             No pose data available for this video yet. Run pose analysis first.
                           </div>
                         )}
 
-                        {!historyReport && !historyReportLoading && !historyReportError && historyPoseData && (
+                        {!historyReport &&
+                          !historyPoseLoading &&
+                          !historyReportLoading &&
+                          !historyReportError &&
+                          historyPoseData &&
+                          !historyPoseReadyForReport && (
+                            <div className="rounded-xl border border-border bg-muted/40 p-4 text-sm text-muted-foreground">
+                              {historyPoseAvailabilityMessage}
+                            </div>
+                          )}
+
+                        {!historyReport &&
+                          !historyPoseLoading &&
+                          !historyReportLoading &&
+                          !historyReportError &&
+                          historyPoseData &&
+                          historyPoseReadyForReport && (
                           <div className="rounded-xl border border-border bg-card p-4">
                             <p className="text-sm text-muted-foreground">
                               No saved report found for {getAthleteSlotLabel(selectedHistoryAthleteSlot)}.

@@ -36,7 +36,7 @@ export default function InvitationsPage() {
 
   useEffect(() => {
     if (!isLoading && (!user || !user.is_admin)) {
-      router.push("/");
+      router.replace("/");
     }
   }, [user, isLoading, router]);
 

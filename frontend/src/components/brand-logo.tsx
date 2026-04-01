@@ -60,22 +60,17 @@ export function BrandLogo({
 
   return (
     <span className="inline-flex flex-col items-start gap-1">
-      {tone === "light" ? (
-        <Image
-          src="/brand/logo-lockup.svg"
-          alt="Engarde AI"
-          width={lockup.width}
-          height={lockup.height}
-          priority
-        />
-      ) : (
-        <span className="inline-flex items-center gap-2">
-          <Image src="/brand/logo-mark.svg" alt="Engarde AI mark" width={markPx} height={markPx} priority />
-          <span className={`${WORDMARK_TEXT_SIZE[size]} font-bold tracking-tight text-foreground`}>
-            Engarde<span className="text-red-600">AI</span>
-          </span>
+      <span className="inline-flex items-center gap-2">
+        <Image src="/brand/logo-mark.svg" alt="Engarde AI mark" width={markPx} height={markPx} priority />
+        <span
+          className={`${WORDMARK_TEXT_SIZE[size]} font-bold tracking-tight ${
+            tone === "light" ? "text-white" : "text-foreground"
+          }`}
+          style={{ lineHeight: `${lockup.height}px` }}
+        >
+          Engarde<span className={tone === "light" ? "text-amber-400" : "text-red-600"}>AI</span>
         </span>
-      )}
+      </span>
       {withTagline ? <BrandTagline tone={tone} /> : null}
     </span>
   );

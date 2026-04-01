@@ -313,10 +313,6 @@ def verify_email(token: str, http_request: Request, db: Session = Depends(get_db
     user.verification_token_expires = None
     db.commit()
 
-    # Send welcome email
-    from app.services.email import email_service
-    email_service.send_welcome_email(user.email, user.username)
-
     return VerifyEmailResponse(
         success=True,
         message="Email verified successfully"

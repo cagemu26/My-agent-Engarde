@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, useDeferredValue, startTransition } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import {
@@ -12,12 +12,14 @@ import {
 } from "@/lib/analysis-report";
 import { authFetch, buildAuthedApiUrl } from "@/lib/api";
 import {
+  getPoseDataAvailabilityMessage,
   getAthleteSlotLabel,
   getAthleteSlotShortLabel,
   getAvailableAthleteSlots,
   getDefaultAthleteSlot,
   getSlotPoseFrames,
   hasDualAthletePose,
+  isPoseDataReadyForReport,
   readPoseLandmark,
   type AthleteSlot,
   type PoseData,
@@ -483,6 +485,7 @@ export default function VideoDetail() {
   const [report, setReport] = useState<AnalysisReport | null>(null);
 
   const [loading, setLoading] = useState(true);
+  const [analysisLoading, setAnalysisLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
   const [reportAction, setReportAction] = useState<"load" | "generate" | null>(null);
@@ -498,12 +501,22 @@ export default function VideoDetail() {
   const [isDominantHintOpen, setIsDominantHintOpen] = useState(false);
   const dominantHintRef = useRef<HTMLDivElement | null>(null);
 
+  const deferredPoseData = useDeferredValue(poseData);
+
   const availableAthleteSlots = useMemo(
-    () => getAvailableAthleteSlots(poseData),
-    [poseData],
+    () => getAvailableAthleteSlots(deferredPoseData),
+    [deferredPoseData],
   );
   const hasDualAthletes = useMemo(
-    () => hasDualAthletePose(poseData),
+    () => hasDualAthletePose(deferredPoseData),
+    [deferredPoseData],
+  );
+  const poseDataReadyForReport = useMemo(
+    () => isPoseDataReadyForReport(poseData),
+    [poseData],
+  );
+  const poseAvailabilityMessage = useMemo(
+    () => getPoseDataAvailabilityMessage(poseData),
     [poseData],
   );
 
@@ -511,57 +524,52 @@ export default function VideoDetail() {
     try {
       setLoading(true);
       setError(null);
+      setAnalysisLoading(false);
+      setVideo(null);
+      setPoseData(null);
+      setReportLoading(false);
+      setReportAction(null);
       setReportError(null);
       setReport(readCachedAnalysisReport<AnalysisReport>(videoId));
+      setSkeletonReady(false);
+      setSkeletonLoading(false);
+      setSkeletonError(null);
 
-      // Fetch video metadata
       const videoResponse = await authFetch(`/video/${videoId}`);
       if (!videoResponse.ok) {
         throw new Error("Failed to fetch video");
       }
       const videoData = await videoResponse.json();
       setVideo(videoData);
-
-      // Fetch pose data (if available)
-      let nextPoseData: PoseData | null = null;
-      try {
-        const poseResponse = await authFetch(`/video/${videoId}/pose-data`);
-        if (poseResponse.ok) {
-          nextPoseData = (await poseResponse.json()) as PoseData;
-          setPoseData(nextPoseData);
-          setSelectedAthleteSlot(getDefaultAthleteSlot(nextPoseData));
-        } else {
-          setPoseData(null);
-        }
-      } catch {
-        setPoseData(null);
-      }
-
-      try {
-        if (nextPoseData) {
-          setReportLoading(true);
-          setReportAction("load");
-          const defaultSlot = getDefaultAthleteSlot(nextPoseData);
-          const reportData = await ensureAnalysisReport<AnalysisReport>(videoId, {
-            athleteSlot: defaultSlot,
-            generateIfMissing: false,
-          });
-          setReport(reportData);
-        } else {
-          setReport(null);
-        }
-      } catch (err) {
-        setReport(null);
-        setReportError(err instanceof Error ? err.message : "Failed to fetch report");
-      } finally {
-        setReportLoading(false);
-        setReportAction(null);
-      }
-
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load video");
     } finally {
       setLoading(false);
+    }
+  }, [videoId]);
+
+  const fetchPoseData = useCallback(async () => {
+    try {
+      setAnalysisLoading(true);
+      setReportError(null);
+
+      const poseResponse = await authFetch(`/video/${videoId}/pose-data`);
+      if (!poseResponse.ok) {
+        setPoseData(null);
+        return;
+      }
+
+      const nextPoseData = (await poseResponse.json()) as PoseData;
+      const defaultSlot = getDefaultAthleteSlot(nextPoseData);
+
+      startTransition(() => {
+        setPoseData(nextPoseData);
+        setSelectedAthleteSlot(defaultSlot);
+      });
+    } catch {
+      setPoseData(null);
+    } finally {
+      setAnalysisLoading(false);
     }
   }, [videoId]);
 
@@ -570,6 +578,18 @@ export default function VideoDetail() {
       fetchVideoData();
     }
   }, [videoId, fetchVideoData]);
+
+  useEffect(() => {
+    if (!videoId || !video) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      void fetchPoseData();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [fetchPoseData, video, videoId]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !videoId) {
@@ -602,6 +622,14 @@ export default function VideoDetail() {
 
   useEffect(() => {
     if (!poseData) {
+      return;
+    }
+
+    if (!isPoseDataReadyForReport(poseData)) {
+      setReport(null);
+      setReportLoading(false);
+      setReportAction(null);
+      setReportError(null);
       return;
     }
 
@@ -778,14 +806,14 @@ export default function VideoDetail() {
   const originalReplayUrl = buildAuthedApiUrl(`/video/${videoId}/file`);
   const skeletonReplayUrl = buildAuthedApiUrl(`/video/${videoId}/pose-overlay/file`);
   const poseFrames = useMemo(
-    () => getSlotPoseFrames(poseData, selectedAthleteSlot),
-    [poseData, selectedAthleteSlot],
+    () => getSlotPoseFrames(deferredPoseData, selectedAthleteSlot),
+    [deferredPoseData, selectedAthleteSlot],
   );
   const selectedAthleteLabel = useMemo(
     () => getAthleteSlotLabel(selectedAthleteSlot),
     [selectedAthleteSlot],
   );
-  const poseFps = poseData?.video_properties?.fps || 0;
+  const poseFps = deferredPoseData?.video_properties?.fps || 0;
   const inferredDominantSide = useMemo(() => inferDominantSide(poseFrames), [poseFrames]);
   const activeDominantSide = dominantSideMode === "auto" ? inferredDominantSide : dominantSideMode;
 
@@ -1179,7 +1207,7 @@ export default function VideoDetail() {
                   </div>
                   <div>
                     <p className="text-sm text-muted-foreground">Pose FPS</p>
-                    <p className="text-2xl font-bold">{poseData.video_properties?.fps || "N/A"}</p>
+                    <p className="text-2xl font-bold">{deferredPoseData?.video_properties?.fps || "N/A"}</p>
                   </div>
                   <div>
                     <p className="text-sm text-muted-foreground">Selected Athlete</p>
@@ -1360,6 +1388,12 @@ export default function VideoDetail() {
                   </div>
                 ) : null}
               </div>
+            ) : poseData && !poseDataReadyForReport ? (
+              <div className="p-4 rounded-xl bg-muted/50 border border-border">
+                <p className="text-muted-foreground text-sm">
+                  {poseAvailabilityMessage}
+                </p>
+              </div>
             ) : poseData ? (
               <div className="p-4 rounded-xl bg-card border border-border">
                 {reportLoading ? (
@@ -1385,6 +1419,15 @@ export default function VideoDetail() {
                   </div>
                 )}
               </div>
+            ) : analysisLoading ? (
+              <div className="p-4 rounded-xl bg-card border border-border">
+                <div className="flex items-center justify-center py-8">
+                  <div className="flex flex-col items-center gap-3">
+                    <div className="w-6 h-6 border-4 border-primary border-t-transparent rounded-full animate-spin"></div>
+                    <p className="text-muted-foreground text-sm">Loading pose analysis...</p>
+                  </div>
+                </div>
+              </div>
             ) : (
               <div className="p-4 rounded-xl bg-muted/50 border border-border">
                 <p className="text-muted-foreground text-sm">
@@ -1395,7 +1438,7 @@ export default function VideoDetail() {
           </div>
 
           {/* No Data State */}
-          {!poseData && (
+          {!poseData && !analysisLoading && (
             <div className="p-6 rounded-xl bg-muted/50 border border-border text-center">
               <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-muted flex items-center justify-center">
                 <svg className="w-6 h-6 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor">

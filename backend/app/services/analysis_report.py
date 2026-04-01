@@ -20,7 +20,7 @@ POSE_REPORT_PROMPT_VERSION = "pose-report-v4"
 POSE_REPORT_MAX_FRAMES = 180
 POSE_REPORT_MIN_FRAMES = 56
 POSE_REPORT_MOTION_FOCUS_RATIO = 0.4
-POSE_REPORT_TARGET_PROMPT_CHARS = 120000
+POSE_REPORT_TARGET_PROMPT_CHARS = 42000
 POSE_REPORT_MAX_GENERATION_ATTEMPTS = 2
 POSE_REPORT_SUMMARY_MAX_CHARS = 220
 POSE_REPORT_TEMPERATURE = 0.35
@@ -32,9 +32,9 @@ POSE_REPORT_MIN_EFFECTIVE_FRAMES = 30
 POSE_REPORT_STATUS_READY = "ready"
 POSE_REPORT_STATUS_INSUFFICIENT = "insufficient_data"
 POSE_REPORT_SECTION_MARKER_GROUPS = (
-    ("姿态分析", "pose analysis", "technical analysis", "overall stance"),
-    ("动作识别", "action recognition", "movement recognition", "动作分析"),
-    ("训练建议", "training recommendation", "training suggestion", "training plan"),
+    ("姿态分析", "pose analysis", "technical analysis", "overall stance", "整体姿态", "整体评估", "技术分析", "站姿", "重心"),
+    ("动作识别", "action recognition", "movement recognition", "动作分析", "动作模式", "动作特征", "movement pattern"),
+    ("训练建议", "training recommendation", "training suggestion", "training plan", "改进建议", "训练重点", "训练方案", "下一步训练"),
 )
 POSE_REPORT_METADATA_HINTS = (
     "视频id",
@@ -44,6 +44,31 @@ POSE_REPORT_METADATA_HINTS = (
     "处理帧数",
     "frames analyzed",
 )
+POSE_REPORT_RECOMMENDATION_HINTS = (
+    "训练建议",
+    "改进建议",
+    "训练重点",
+    "训练方案",
+    "建议",
+    "训练",
+)
+POSE_REPORT_ISSUE_HINTS = (
+    "技术问题",
+    "主要问题",
+    "需要改进",
+    "改进点",
+    "不足",
+    "问题",
+    "风险",
+)
+POSE_REPORT_STRENGTH_HINTS = (
+    "技术优点",
+    "优点",
+    "亮点",
+    "做得好的地方",
+    "稳定点",
+)
+POSE_REPORT_MIN_VALID_CHARS = 800
 POSE_REPORT_RETRY_MESSAGE = "分析失败，请重新分析。"
 POSE_REPORT_LEGACY_FALLBACK_MARKERS = (
     "由于云端响应不稳定，采用了降级报告模板",
@@ -455,17 +480,30 @@ class AnalysisReportService:
         return any(marker in lowered for marker in POSE_REPORT_METADATA_HINTS)
 
     def _is_valid_report_output(self, text: str) -> bool:
-        if not text or len(text) < 200:
+        if not text or len(text) < POSE_REPORT_MIN_VALID_CHARS:
             return False
 
-        marker_hits = self._count_marker_group_hits(text)
-        has_markdown_header = text.lstrip().startswith("#")
-        has_metadata_hint = self._contains_report_metadata(text)
-        has_training_section = any(marker in text.lower() for marker in POSE_REPORT_SECTION_MARKER_GROUPS[2])
+        normalized = self._normalize_model_output(text)
+        lowered = normalized.lower()
+        marker_hits = self._count_marker_group_hits(normalized)
+        has_markdown_header = normalized.lstrip().startswith("#")
+        has_metadata_hint = self._contains_report_metadata(normalized)
+        has_training_section = any(marker in lowered for marker in POSE_REPORT_SECTION_MARKER_GROUPS[2])
+        has_recommendation_hint = any(marker in normalized for marker in POSE_REPORT_RECOMMENDATION_HINTS)
+        has_issue_hint = any(marker in normalized for marker in POSE_REPORT_ISSUE_HINTS)
+        has_strength_hint = any(marker in normalized for marker in POSE_REPORT_STRENGTH_HINTS)
+        structured_blocks = len(re.findall(r"(^|\n)\s*(?:#+\s+|\d+[.)、]|[-*]\s+)", normalized))
 
         if marker_hits >= 2:
             return True
-        return has_markdown_header and has_metadata_hint and has_training_section
+        if (
+            (has_markdown_header or structured_blocks >= 3)
+            and has_training_section
+            and (has_issue_hint or has_strength_hint or has_metadata_hint or marker_hits >= 1)
+            and has_recommendation_hint
+        ):
+            return True
+        return False
 
     async def _generate_report_body(self, video_id: str, pose_data: dict[str, Any]) -> str:
         prompt = self.build_pose_prompt(video_id, pose_data)

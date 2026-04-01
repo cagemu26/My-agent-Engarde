@@ -8,7 +8,9 @@ and generates overlay assets and normalized pose data for downstream reports.
 from __future__ import annotations
 
 import json
+import logging
 import shutil
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -31,6 +33,10 @@ POSE_LANDMARKER_NUM_POSES = 2
 POSE_DETECTION_THRESHOLD = 0.45
 DUAL_SLOT_LOCK_THRESHOLD = 2
 TRACK_MEMORY_MAX_MISSES = 24
+BROWSER_COMPATIBLE_MP4_CODECS = {"h264"}
+
+
+logger = logging.getLogger(__name__)
 
 
 class PoseAnalysisService:
@@ -84,7 +90,6 @@ class PoseAnalysisService:
         self.analysis_dir.mkdir(parents=True, exist_ok=True)
 
         self.mp_drawing = mp.solutions.drawing_utils
-        self.pose_landmarker: Optional[PoseLandmarker] = None
         self.model_path = Path(settings.POSE_LANDMARKER_MODEL_PATH)
         self.model_url = settings.POSE_LANDMARKER_MODEL_URL
 
@@ -99,6 +104,80 @@ class PoseAnalysisService:
     def _get_overlay_video_path(self, video_id: str) -> Path:
         return self._get_analysis_dir(video_id) / "pose_overlay.mp4"
 
+    def _probe_video_codec(self, video_path: Path) -> Optional[str]:
+        ffprobe_bin = shutil.which("ffprobe")
+        if not ffprobe_bin or not video_path.exists():
+            return None
+
+        command = [
+            ffprobe_bin,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(video_path),
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (subprocess.CalledProcessError, OSError):
+            return None
+
+        codec_name = completed.stdout.strip().lower()
+        return codec_name or None
+
+    def _is_browser_compatible_overlay(self, video_path: Path) -> bool:
+        codec_name = self._probe_video_codec(video_path)
+        if codec_name is None:
+            return True
+        return codec_name in BROWSER_COMPATIBLE_MP4_CODECS
+
+    def _transcode_overlay_for_web(self, source_path: Path, output_path: Path) -> bool:
+        ffmpeg_bin = shutil.which("ffmpeg")
+        if not ffmpeg_bin:
+            logger.warning("ffmpeg unavailable, falling back to raw overlay at %s", source_path)
+            return False
+
+        command = [
+            ffmpeg_bin,
+            "-y",
+            "-i",
+            str(source_path),
+            "-an",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (subprocess.CalledProcessError, OSError) as exc:
+            stderr = ""
+            if isinstance(exc, subprocess.CalledProcessError):
+                stderr = (exc.stderr or "").strip()
+            logger.warning("Overlay transcode failed for %s: %s", source_path, stderr or exc)
+            return False
+
+        if completed.stderr:
+            logger.debug("Overlay transcode output for %s: %s", source_path, completed.stderr.strip())
+        return output_path.exists()
+
     def _ensure_model_asset(self) -> Path:
         if self.model_path.exists():
             return self.model_path
@@ -112,10 +191,7 @@ class PoseAnalysisService:
                         file_handle.write(chunk)
         return self.model_path
 
-    def _get_pose_landmarker(self) -> PoseLandmarker:
-        if self.pose_landmarker is not None:
-            return self.pose_landmarker
-
+    def _create_pose_landmarker(self) -> PoseLandmarker:
         model_path = self._ensure_model_asset()
         options = PoseLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=str(model_path)),
@@ -126,8 +202,7 @@ class PoseAnalysisService:
             min_tracking_confidence=POSE_DETECTION_THRESHOLD,
             output_segmentation_masks=False,
         )
-        self.pose_landmarker = PoseLandmarker.create_from_options(options)
-        return self.pose_landmarker
+        return PoseLandmarker.create_from_options(options)
 
     def _compute_center_and_scale(self, landmarks: list[dict[str, float]]) -> tuple[float, float, float]:
         visible_points = [
@@ -479,7 +554,7 @@ class PoseAnalysisService:
         if not cap.isOpened():
             raise ValueError(f"Cannot open video file: {video_path}")
 
-        landmarker = self._get_pose_landmarker()
+        landmarker = self._create_pose_landmarker()
 
         try:
             fps = int(cap.get(cv2.CAP_PROP_FPS))
@@ -538,6 +613,9 @@ class PoseAnalysisService:
 
                 frame_idx += 1
         finally:
+            close = getattr(landmarker, "close", None)
+            if callable(close):
+                close()
             cap.release()
 
         pose_data_path = self._get_pose_data_path(video_id)
@@ -629,25 +707,40 @@ class PoseAnalysisService:
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
         output_path = self._get_overlay_video_path(video_id)
+        raw_output_path = output_path.with_name(f"{output_path.stem}.raw.mp4")
+        if raw_output_path.exists():
+            raw_output_path.unlink()
+        if output_path.exists():
+            output_path.unlink()
+
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        out = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+        out = cv2.VideoWriter(str(raw_output_path), fourcc, fps, (width, height))
+        if not out.isOpened():
+            cap.release()
+            raise ValueError(f"Cannot create overlay video at {raw_output_path}")
 
         frame_idx = 0
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
+        try:
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
 
-            pose_frame = pose_by_frame.get(frame_idx)
-            if pose_frame:
-                for athlete in pose_frame.get("athletes", []):
-                    self._draw_athlete_landmarks(frame, athlete)
+                pose_frame = pose_by_frame.get(frame_idx)
+                if pose_frame:
+                    for athlete in pose_frame.get("athletes", []):
+                        self._draw_athlete_landmarks(frame, athlete)
 
-            out.write(frame)
-            frame_idx += 1
+                out.write(frame)
+                frame_idx += 1
+        finally:
+            cap.release()
+            out.release()
 
-        cap.release()
-        out.release()
+        if not self._transcode_overlay_for_web(raw_output_path, output_path):
+            raw_output_path.replace(output_path)
+        elif raw_output_path.exists():
+            raw_output_path.unlink()
 
         print(f"Pose overlay video saved to: {output_path}")
         return str(output_path)
@@ -663,7 +756,7 @@ class PoseAnalysisService:
 
     def get_overlay_path(self, video_id: str) -> Optional[str]:
         overlay_path = self._get_overlay_video_path(video_id)
-        if overlay_path.exists():
+        if overlay_path.exists() and self._is_browser_compatible_overlay(overlay_path):
             return str(overlay_path)
         return None
 

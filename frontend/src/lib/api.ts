@@ -1,4 +1,10 @@
 const AUTH_EXPIRED_TOAST_COOLDOWN_MS = 2500;
+const AUTH_REDIRECT_BLOCKED_PATHS = new Set([
+  "/login",
+  "/register",
+  "/verify-email",
+  "/reset-password",
+]);
 
 let authRedirectInProgress = false;
 let lastAuthExpiredNoticeAt = 0;
@@ -69,8 +75,18 @@ export function authFetch(path: string, init: RequestInit = {}): Promise<Respons
     }
 
     if (!authRedirectInProgress) {
+      const pathname = window.location.pathname || "";
+      if (AUTH_REDIRECT_BLOCKED_PATHS.has(pathname)) {
+        return response;
+      }
+
       authRedirectInProgress = true;
-      window.location.href = "/login";
+      const nextPath = `${pathname}${window.location.search || ""}${window.location.hash || ""}`;
+      const loginTarget =
+        nextPath && nextPath !== "/"
+          ? `/login?next=${encodeURIComponent(nextPath)}`
+          : "/login";
+      window.location.replace(loginTarget);
     }
 
     return response;

@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { buildApiUrl } from "@/lib/api";
 
@@ -15,6 +15,7 @@ export default function LoginPage() {
   const [isLoading, setIsLoading] = useState(false);
   const { login } = useAuth();
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -24,7 +25,9 @@ export default function LoginPage() {
 
     try {
       await login(email, password);
-      router.push("/analyze");
+      const next = searchParams.get("next");
+      const safeNext = next && next.startsWith("/") && !next.startsWith("//") ? next : "/analyze";
+      router.replace(safeNext);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
     } finally {
