@@ -204,10 +204,12 @@ const TRAINING_HANDOFF_STORAGE_KEY = "engarde.training.handoff";
 const MAX_SESSION_MESSAGES = 30;
 const MAX_SESSION_VIDEOS = 20;
 const MAX_BACKEND_SESSION_MESSAGES = 80;
-const MAX_CONTEXT_CHARS = 22000;
-const TARGET_CONTEXT_FRAMES = 160;
-const MIN_CONTEXT_FRAMES = 52;
-const MAX_REPORT_EXCERPT_CHARS = 900;
+// Keep the browser-side context pack roughly aligned with the backend safety
+// budget for MiniMax M2.7 instead of the previous 20k-char bottleneck.
+const MAX_CONTEXT_CHARS = 180000;
+const TARGET_CONTEXT_FRAMES = 480;
+const MIN_CONTEXT_FRAMES = 96;
+const MAX_REPORT_EXCERPT_CHARS = 2400;
 
 const DEFAULT_CHAT_OPENING =
   "Hi! I'm your fencing AI coach. Ask me anything about technique, training, or analyze your videos. How can I help you today?";
@@ -445,6 +447,7 @@ function AnalyzeContent() {
   const [hasHandledSearchParamVideo, setHasHandledSearchParamVideo] = useState(false);
   const [hasHandledTrainingHandoff, setHasHandledTrainingHandoff] = useState(false);
   const [pendingAutoQuestion, setPendingAutoQuestion] = useState<string | null>(null);
+  const [pendingQueuedMessage, setPendingQueuedMessage] = useState<string | null>(null);
   const [activeChatVideoId, setActiveChatVideoId] = useState<string | null>(null);
   const [activeChatSessionId, setActiveChatSessionId] = useState<string | null>(null);
   const [chatContextPack, setChatContextPack] = useState<ChatContextPack | null>(null);
@@ -906,6 +909,7 @@ function AnalyzeContent() {
       syncAnalyzeSessionUrl(sessionId);
       setSessionHydrated(false);
       setIsDraftChatSession(false);
+      setPendingQueuedMessage(null);
       setExternalContextPayload(null);
       setExternalContextSummary("");
       setExternalContextStatus(null);
@@ -1132,6 +1136,7 @@ function AnalyzeContent() {
       setNeedsExternalContextForNextSend(false);
       setSessionHydrated(false);
       setIsDraftChatSession(false);
+      setPendingQueuedMessage(null);
 
       try {
         const resolved = await resolveBackendChatSession({
@@ -1422,6 +1427,7 @@ function AnalyzeContent() {
       setActiveChatSessionId(null);
       setSessionHydrated(false);
       setIsDraftChatSession(false);
+      setPendingQueuedMessage(null);
       setExternalContextPayload(null);
       setExternalContextSummary("");
       setExternalContextStatus(null);
@@ -1802,6 +1808,7 @@ function AnalyzeContent() {
     setSessionHydrated(true);
     setIsDraftChatSession(true);
     setPendingAutoQuestion(null);
+    setPendingQueuedMessage(null);
 
     setActiveChatVideoId(null);
     setActiveChatSessionId(null);
@@ -1885,12 +1892,37 @@ function AnalyzeContent() {
     const opponent = historyDetail.opponent ? ` vs ${historyDetail.opponent}` : "";
     const prompt = `Please review ${title}${opponent} and give me 3 concrete improvements for my next training session.`;
 
-    if (selectedHistoryVideoId && selectedHistoryVideoId !== activeChatVideoId) {
-      void activateVideoChatSession(selectedHistoryVideoId);
-    }
     setInput(prompt);
-    setActiveTab("chat");
-  }, [activeChatVideoId, activateVideoChatSession, historyDetail, selectedHistoryVideoId]);
+    setPendingQueuedMessage(null);
+
+    void (async () => {
+      if (
+        selectedHistoryVideoId &&
+        (selectedHistoryVideoId !== activeChatVideoId || !sessionHydrated || isContextPreparing)
+      ) {
+        await activateVideoChatSession(selectedHistoryVideoId, {
+          switchToChat: true,
+          preloaded: {
+            video: historyDetail,
+            pose: historyPoseData,
+            report: historyReport,
+          },
+        });
+        return;
+      }
+
+      setActiveTab("chat");
+    })();
+  }, [
+    activeChatVideoId,
+    activateVideoChatSession,
+    historyDetail,
+    historyPoseData,
+    historyReport,
+    isContextPreparing,
+    selectedHistoryVideoId,
+    sessionHydrated,
+  ]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -2171,7 +2203,7 @@ function AnalyzeContent() {
       setIsTyping(true);
 
       try {
-        const recentMessages = nextMessages.slice(-10);
+        const recentMessages = nextMessages.slice(-MAX_BACKEND_SESSION_MESSAGES);
         let contextPayload: string | undefined;
         let sessionIdForSend = activeChatSessionId;
 
@@ -2408,8 +2440,17 @@ function AnalyzeContent() {
   );
 
   const handleSend = useCallback(() => {
-    void sendMessage(input);
-  }, [input, sendMessage]);
+    const nextMessage = input.trim();
+    if (!nextMessage || isTyping) return;
+
+    if (isContextPreparing) {
+      setPendingQueuedMessage(nextMessage);
+      setInput("");
+      return;
+    }
+
+    void sendMessage(nextMessage);
+  }, [input, isContextPreparing, isTyping, sendMessage]);
 
   const handleComposerKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -2445,6 +2486,7 @@ function AnalyzeContent() {
     setIsContextPreparing(false);
     setSessionHydrated(true);
     setIsDraftChatSession(true);
+    setPendingQueuedMessage(null);
 
     setActiveChatVideoId(null);
     setActiveChatSessionId(null);
@@ -2562,6 +2604,15 @@ function AnalyzeContent() {
     pendingAutoQuestion,
     sendMessage,
   ]);
+
+  useEffect(() => {
+    if (!pendingQueuedMessage) return;
+    if (isTyping || isContextPreparing) return;
+
+    const queuedMessage = pendingQueuedMessage;
+    setPendingQueuedMessage(null);
+    void sendMessage(queuedMessage);
+  }, [isContextPreparing, isTyping, pendingQueuedMessage, sendMessage]);
 
   const getWeaponStyle = (weapon: string) => {
     return WEAPON_TYPES.find((w) => w.value === weapon) || WEAPON_TYPES[1];
@@ -3516,7 +3567,7 @@ function AnalyzeContent() {
                       <button
                         type="button"
                         onClick={handleSend}
-                        disabled={!input.trim() || isTyping || isContextPreparing}
+                        disabled={!input.trim() || isTyping}
                         className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-600 text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-45"
                         aria-label="Send"
                       >
@@ -3540,7 +3591,11 @@ function AnalyzeContent() {
                       </p>
                     ) : null}
                     {isContextPreparing ? (
-                      <p className="mt-1 text-xs leading-5 text-muted-foreground">Preparing video context...</p>
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                        {pendingQueuedMessage
+                          ? "Preparing video context... Your message will send automatically when ready."
+                          : "Preparing video context..."}
+                      </p>
                     ) : null}
                   </div>
                 </div>

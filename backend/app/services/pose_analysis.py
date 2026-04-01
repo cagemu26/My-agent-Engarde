@@ -84,7 +84,6 @@ class PoseAnalysisService:
         self.analysis_dir.mkdir(parents=True, exist_ok=True)
 
         self.mp_drawing = mp.solutions.drawing_utils
-        self.pose_landmarker: Optional[PoseLandmarker] = None
         self.model_path = Path(settings.POSE_LANDMARKER_MODEL_PATH)
         self.model_url = settings.POSE_LANDMARKER_MODEL_URL
 
@@ -112,10 +111,7 @@ class PoseAnalysisService:
                         file_handle.write(chunk)
         return self.model_path
 
-    def _get_pose_landmarker(self) -> PoseLandmarker:
-        if self.pose_landmarker is not None:
-            return self.pose_landmarker
-
+    def _create_pose_landmarker(self) -> PoseLandmarker:
         model_path = self._ensure_model_asset()
         options = PoseLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=str(model_path)),
@@ -126,8 +122,7 @@ class PoseAnalysisService:
             min_tracking_confidence=POSE_DETECTION_THRESHOLD,
             output_segmentation_masks=False,
         )
-        self.pose_landmarker = PoseLandmarker.create_from_options(options)
-        return self.pose_landmarker
+        return PoseLandmarker.create_from_options(options)
 
     def _compute_center_and_scale(self, landmarks: list[dict[str, float]]) -> tuple[float, float, float]:
         visible_points = [
@@ -479,7 +474,7 @@ class PoseAnalysisService:
         if not cap.isOpened():
             raise ValueError(f"Cannot open video file: {video_path}")
 
-        landmarker = self._get_pose_landmarker()
+        landmarker = self._create_pose_landmarker()
 
         try:
             fps = int(cap.get(cv2.CAP_PROP_FPS))
@@ -538,6 +533,9 @@ class PoseAnalysisService:
 
                 frame_idx += 1
         finally:
+            close = getattr(landmarker, "close", None)
+            if callable(close):
+                close()
             cap.release()
 
         pose_data_path = self._get_pose_data_path(video_id)

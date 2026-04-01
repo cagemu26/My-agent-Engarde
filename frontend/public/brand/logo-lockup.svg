@@ -11,6 +11,6 @@
   <rect x="30" y="60" width="36" height="6" rx="3" fill="white" fill-opacity="0.88"/>
   <text x="104" y="60" font-family="Outfit, system-ui, -apple-system, sans-serif" font-size="46" font-weight="700">
     <tspan fill="#F8FAFC">Engarde</tspan>
-    <tspan fill="#F59E0B">AI</tspan>
+    <tspan fill="#F8FAFC">AI</tspan>
   </text>
 </svg>

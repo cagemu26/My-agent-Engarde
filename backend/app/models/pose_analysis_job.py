@@ -2,9 +2,9 @@ from datetime import datetime
 import uuid
 
 from sqlalchemy import Column, DateTime, ForeignKey, Index, String, Text
-from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base
+from app.core.types import GUID
 
 
 class PoseAnalysisJob(Base):
@@ -14,8 +14,8 @@ class PoseAnalysisJob(Base):
         Index("ix_pose_jobs_status_updated", "status", "updated_at"),
     )
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
     video_id = Column(String(64), nullable=False, index=True)
     status = Column(String(24), nullable=False, default="pending", index=True)
     result_json = Column(Text, nullable=True)

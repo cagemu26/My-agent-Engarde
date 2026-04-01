@@ -13,12 +13,6 @@ const MARK_PIXELS: Record<BrandLogoProps["size"], number> = {
   lg: 48,
 };
 
-const LOCKUP_PIXELS: Record<BrandLogoProps["size"], { width: number; height: number }> = {
-  sm: { width: 136, height: 32 },
-  md: { width: 170, height: 40 },
-  lg: { width: 204, height: 48 },
-};
-
 const WORDMARK_TEXT_SIZE: Record<BrandLogoProps["size"], string> = {
   sm: "text-base",
   md: "text-xl",
@@ -56,26 +50,17 @@ export function BrandLogo({
     );
   }
 
-  const lockup = LOCKUP_PIXELS[size];
+  const wordmarkToneClass = tone === "light" ? "text-slate-50" : "text-foreground";
+  const accentToneClass = tone === "light" ? "text-amber-400" : "text-red-600";
 
   return (
     <span className="inline-flex flex-col items-start gap-1">
-      {tone === "light" ? (
-        <Image
-          src="/brand/logo-lockup.svg"
-          alt="Engarde AI"
-          width={lockup.width}
-          height={lockup.height}
-          priority
-        />
-      ) : (
-        <span className="inline-flex items-center gap-2">
-          <Image src="/brand/logo-mark.svg" alt="Engarde AI mark" width={markPx} height={markPx} priority />
-          <span className={`${WORDMARK_TEXT_SIZE[size]} font-bold tracking-tight text-foreground`}>
-            Engarde<span className="text-red-600">AI</span>
-          </span>
+      <span className="inline-flex items-center gap-2">
+        <Image src="/brand/logo-mark.svg" alt="Engarde AI mark" width={markPx} height={markPx} priority />
+        <span className={`${WORDMARK_TEXT_SIZE[size]} font-bold tracking-tight ${wordmarkToneClass}`}>
+          Engarde<span className={accentToneClass}>AI</span>
         </span>
-      )}
+      </span>
       {withTagline ? <BrandTagline tone={tone} /> : null}
     </span>
   );

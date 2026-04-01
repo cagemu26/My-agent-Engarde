@@ -41,10 +41,13 @@ logger = logging.getLogger(__name__)
 # Skills directory path
 SKILLS_DIR = Path(__file__).parent.parent / "skills"
 LLM_REQUEST_TIMEOUT_SECONDS = 120.0
-MAX_CONTEXT_CHARS = 24000
-MAX_SINGLE_MESSAGE_CHARS = 6000
-MAX_TOTAL_MESSAGES_CHARS = 18000
-MAX_SESSION_HISTORY_MESSAGES = 24
+# MiniMax M2.7 supports a 204800-token combined input/output window. The app
+# still budgets by characters, so keep a safety margin instead of sending the
+# full theoretical limit.
+MAX_CONTEXT_CHARS = settings.LLM_MAX_CONTEXT_CHARS
+MAX_SINGLE_MESSAGE_CHARS = settings.LLM_MAX_SINGLE_MESSAGE_CHARS
+MAX_TOTAL_MESSAGES_CHARS = settings.LLM_MAX_TOTAL_MESSAGES_CHARS
+MAX_SESSION_HISTORY_MESSAGES = settings.LLM_MAX_SESSION_HISTORY_MESSAGES
 MAX_CONTEXT_SUMMARY_CHARS = 2200
 SESSION_TYPE_VIDEO = "video_analysis"
 SESSION_TYPE_TRAINING = "training_analysis"
@@ -227,13 +230,42 @@ class LLMService:
     def __init__(self):
         self.api_key = settings.MINIMAX_API_KEY
         self.base_url = settings.MINIMAX_BASE_URL
-        self.model = "MiniMax-M2.7"
+        self.model = (settings.MINIMAX_MODEL or "MiniMax-M2.7").strip() or "MiniMax-M2.7"
+        self.max_completion_tokens = max(1, int(settings.LLM_MAX_COMPLETION_TOKENS))
         # Load and cache all knowledge files at initialization
         self.system_prompt = _load_system_prompt()
         self.training_knowledge = _load_training_knowledge()
         self.technique_tactics_knowledge = _load_technique_tactics_knowledge()
         # Cache response templates
         self._response_templates = self._load_all_templates()
+
+    def _build_generation_payload(
+        self,
+        *,
+        api_messages: list[dict[str, Any]],
+        temperature: float,
+        max_tokens: int,
+        stream: bool = False,
+        legacy_max_tokens: bool = False,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": api_messages,
+            "temperature": temperature,
+        }
+        if stream:
+            payload["stream"] = True
+        if legacy_max_tokens:
+            payload["max_tokens"] = max_tokens
+        else:
+            payload["max_completion_tokens"] = max_tokens
+        return payload
+
+    def _should_retry_with_legacy_max_tokens(self, status_code: int, body: str) -> bool:
+        if status_code not in {400, 422}:
+            return False
+        lowered = (body or "").lower()
+        return "max_completion_tokens" in lowered
 
     def _load_all_templates(self) -> dict:
         """Load and cache all response templates"""
@@ -261,7 +293,7 @@ class LLMService:
         context: Optional[str] = None,
         *,
         temperature: float = 0.7,
-        max_tokens: int = 2048,
+        max_tokens: Optional[int] = None,
         response_language_override: Optional[str] = None,
     ) -> str:
         """
@@ -287,22 +319,36 @@ class LLMService:
         # Prepare messages for API
         api_messages = [{"role": "system", "content": final_prompt}]
         api_messages.extend(sanitized_messages)
+        completion_budget = int(max_tokens or self.max_completion_tokens)
 
         try:
             async with httpx.AsyncClient(timeout=LLM_REQUEST_TIMEOUT_SECONDS) as client:
+                request_url = f"{self.base_url}/text/chatcompletion_v2"
+                request_headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                }
                 response = await client.post(
-                    f"{self.base_url}/text/chatcompletion_v2",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": self.model,
-                        "messages": api_messages,
-                        "temperature": temperature,
-                        "max_tokens": max_tokens
-                    }
+                    request_url,
+                    headers=request_headers,
+                    json=self._build_generation_payload(
+                        api_messages=api_messages,
+                        temperature=temperature,
+                        max_tokens=completion_budget,
+                    ),
                 )
+                if self._should_retry_with_legacy_max_tokens(response.status_code, response.text):
+                    logger.info("llm_retrying_with_legacy_max_tokens model=%s", self.model)
+                    response = await client.post(
+                        request_url,
+                        headers=request_headers,
+                        json=self._build_generation_payload(
+                            api_messages=api_messages,
+                            temperature=temperature,
+                            max_tokens=completion_budget,
+                            legacy_max_tokens=True,
+                        ),
+                    )
 
                 if response.status_code == 200:
                     data = response.json()
@@ -373,7 +419,7 @@ class LLMService:
         context: Optional[str] = None,
         *,
         temperature: float = 0.7,
-        max_tokens: int = 2048,
+        max_tokens: Optional[int] = None,
         response_language_override: Optional[str] = None,
     ) -> AsyncIterator[str]:
         if not self.api_key:
@@ -394,101 +440,115 @@ class LLMService:
         )
         api_messages = [{"role": "system", "content": final_prompt}]
         api_messages.extend(sanitized_messages)
+        completion_budget = int(max_tokens or self.max_completion_tokens)
 
         accumulated = ""
         line_buffer: list[str] = []
 
         try:
             async with httpx.AsyncClient(timeout=LLM_REQUEST_TIMEOUT_SECONDS) as client:
-                async with client.stream(
-                    "POST",
-                    f"{self.base_url}/text/chatcompletion_v2",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                        "Accept": "text/event-stream",
-                    },
-                    json={
-                        "model": self.model,
-                        "messages": api_messages,
-                        "temperature": temperature,
-                        "max_tokens": max_tokens,
-                        "stream": True,
-                    },
-                ) as response:
-                    if response.status_code != 200:
-                        body_preview = (await response.aread()).decode("utf-8", errors="ignore")
-                        logger.warning(
-                            "llm_http_stream_error status_code=%s body=%s",
-                            response.status_code,
-                            body_preview[:800],
-                        )
-                        yield self._get_fallback_response(messages)
-                        return
+                request_url = f"{self.base_url}/text/chatcompletion_v2"
+                request_headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                }
+                use_legacy_max_tokens = False
 
-                    async for raw_line in response.aiter_lines():
-                        if raw_line is None:
-                            continue
-                        line = raw_line.strip()
-                        if not line:
-                            continue
-                        line_buffer.append(line)
+                while True:
+                    async with client.stream(
+                        "POST",
+                        request_url,
+                        headers=request_headers,
+                        json=self._build_generation_payload(
+                            api_messages=api_messages,
+                            temperature=temperature,
+                            max_tokens=completion_budget,
+                            stream=True,
+                            legacy_max_tokens=use_legacy_max_tokens,
+                        ),
+                    ) as response:
+                        if response.status_code != 200:
+                            body_preview = (await response.aread()).decode("utf-8", errors="ignore")
+                            if (
+                                not use_legacy_max_tokens
+                                and self._should_retry_with_legacy_max_tokens(response.status_code, body_preview)
+                            ):
+                                logger.info("llm_stream_retrying_with_legacy_max_tokens model=%s", self.model)
+                                use_legacy_max_tokens = True
+                                continue
+                            logger.warning(
+                                "llm_http_stream_error status_code=%s body=%s",
+                                response.status_code,
+                                body_preview[:800],
+                            )
+                            yield self._get_fallback_response(messages)
+                            return
 
-                        if line.startswith("data:"):
-                            line = line[5:].strip()
-                        if not line or line == "[DONE]":
-                            continue
+                        async for raw_line in response.aiter_lines():
+                            if raw_line is None:
+                                continue
+                            line = raw_line.strip()
+                            if not line:
+                                continue
+                            line_buffer.append(line)
 
-                        try:
-                            payload = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-
-                        base_resp = payload.get("base_resp")
-                        if isinstance(base_resp, dict):
-                            status_code = int(base_resp.get("status_code") or 0)
-                            if status_code and status_code != 0:
-                                status_msg = str(base_resp.get("status_msg") or "")
-                                logger.warning(
-                                    "llm_stream_api_error status_code=%s status_msg=%s",
-                                    status_code,
-                                    status_msg,
-                                )
-                                if status_code == 1008:
-                                    if preferred_language == "zh":
-                                        yield "⚠️ AI 服务暂时不可用（API 余额不足）。请检查你的 MiniMax 账户余额。"
-                                    else:
-                                        yield "⚠️ AI service temporarily unavailable (insufficient API balance). Please check your MiniMax account balance."
-                                    return
+                            if line.startswith("data:"):
+                                line = line[5:].strip()
+                            if not line or line == "[DONE]":
                                 continue
 
-                        candidate = self._extract_stream_text_candidate(payload)
-                        delta = self._normalize_stream_delta(candidate, accumulated)
-                        if not delta:
-                            continue
-                        accumulated += delta
-                        yield delta
+                            try:
+                                payload = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
 
-                    if accumulated:
-                        return
+                            base_resp = payload.get("base_resp")
+                            if isinstance(base_resp, dict):
+                                status_code = int(base_resp.get("status_code") or 0)
+                                if status_code and status_code != 0:
+                                    status_msg = str(base_resp.get("status_msg") or "")
+                                    logger.warning(
+                                        "llm_stream_api_error status_code=%s status_msg=%s",
+                                        status_code,
+                                        status_msg,
+                                    )
+                                    if status_code == 1008:
+                                        if preferred_language == "zh":
+                                            yield "⚠️ AI 服务暂时不可用（API 余额不足）。请检查你的 MiniMax 账户余额。"
+                                        else:
+                                            yield "⚠️ AI service temporarily unavailable (insufficient API balance). Please check your MiniMax account balance."
+                                        return
+                                    continue
 
-                    # Some providers may ignore stream=true and still return one JSON payload.
-                    merged = "\n".join(line_buffer)
-                    fallback_payload_line = merged
-                    if fallback_payload_line.startswith("data:"):
-                        fallback_payload_line = fallback_payload_line[5:].strip()
-                    try:
-                        fallback_payload = json.loads(fallback_payload_line)
-                    except json.JSONDecodeError:
+                            candidate = self._extract_stream_text_candidate(payload)
+                            delta = self._normalize_stream_delta(candidate, accumulated)
+                            if not delta:
+                                continue
+                            accumulated += delta
+                            yield delta
+
+                        if accumulated:
+                            return
+
+                        # Some providers may ignore stream=true and still return one JSON payload.
+                        merged = "\n".join(line_buffer)
+                        fallback_payload_line = merged
+                        if fallback_payload_line.startswith("data:"):
+                            fallback_payload_line = fallback_payload_line[5:].strip()
+                        try:
+                            fallback_payload = json.loads(fallback_payload_line)
+                        except json.JSONDecodeError:
+                            yield self._get_fallback_response(messages)
+                            return
+
+                        candidate = self._extract_stream_text_candidate(fallback_payload)
+                        if candidate:
+                            yield candidate
+                            return
+
                         yield self._get_fallback_response(messages)
                         return
-
-                    candidate = self._extract_stream_text_candidate(fallback_payload)
-                    if candidate:
-                        yield candidate
-                        return
-
-                    yield self._get_fallback_response(messages)
         except Exception as exc:
             logger.exception("llm_stream_exception detail=%s", str(exc))
             yield self._get_fallback_response(messages)

@@ -2,9 +2,9 @@ from datetime import datetime
 import uuid
 
 from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base
+from app.core.types import GUID
 
 
 class AnalysisReport(Base):
@@ -23,8 +23,8 @@ class AnalysisReport(Base):
         ),
     )
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
     video_id = Column(String(64), nullable=False, index=True)
     report_type = Column(String(50), nullable=False, default="pose_analysis")
     status = Column(String(20), nullable=False, default="completed", index=True)

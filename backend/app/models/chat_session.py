@@ -2,9 +2,9 @@ from datetime import datetime
 import uuid
 
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, String, Text
-from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base
+from app.core.types import GUID
 
 
 class ChatSession(Base):
@@ -15,8 +15,8 @@ class ChatSession(Base):
         Index("ix_chat_sessions_user_type_updated", "user_id", "session_type", "updated_at"),
     )
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
     video_id = Column(String(64), nullable=True, index=True)
     session_type = Column(String(32), nullable=False, default="chat_qa", index=True)
     title = Column(String(255), nullable=True)

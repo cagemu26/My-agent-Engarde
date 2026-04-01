@@ -3,7 +3,8 @@ FROM node:20-alpine AS deps
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci --prefer-offline || npm install
+RUN npm config set registry https://registry.npmmirror.com/ \
+ && npm ci --prefer-offline --no-audit --fund=false
 
 
 FROM node:20-alpine AS builder

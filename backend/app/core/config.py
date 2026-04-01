@@ -25,6 +25,13 @@ class Settings(BaseSettings):
 
     MINIMAX_API_KEY: str = ""
     MINIMAX_BASE_URL: str = "https://api.minimaxi.com/v1"
+    MINIMAX_MODEL: str = "MiniMax-M2.7"
+    MINIMAX_CONTEXT_WINDOW_TOKENS: int = 204800
+    LLM_MAX_COMPLETION_TOKENS: int = 10240
+    LLM_MAX_CONTEXT_CHARS: int = 180000
+    LLM_MAX_SINGLE_MESSAGE_CHARS: int = 40000
+    LLM_MAX_TOTAL_MESSAGES_CHARS: int = 120000
+    LLM_MAX_SESSION_HISTORY_MESSAGES: int = 80
     RAG_ENABLED: bool = True
     RAG_TOP_K: int = 6
     RAG_SCORE_THRESHOLD: float = 0.25
