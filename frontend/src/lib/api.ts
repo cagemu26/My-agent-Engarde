@@ -1,7 +1,7 @@
 const AUTH_EXPIRED_TOAST_COOLDOWN_MS = 2500;
 
-let authRedirectInProgress = false;
 let lastAuthExpiredNoticeAt = 0;
+export const AUTH_EXPIRED_EVENT = "engarde:auth-expired";
 
 const normalizedBaseUrl = (process.env.NEXT_PUBLIC_API_URL?.trim() || "").replace(/\/+$/, "");
 
@@ -65,12 +65,15 @@ export function authFetch(path: string, init: RequestInit = {}): Promise<Respons
     const now = Date.now();
     if (now - lastAuthExpiredNoticeAt > AUTH_EXPIRED_TOAST_COOLDOWN_MS) {
       lastAuthExpiredNoticeAt = now;
+      window.dispatchEvent(
+        new CustomEvent(AUTH_EXPIRED_EVENT, {
+          detail: {
+            status: response.status,
+            path,
+          },
+        }),
+      );
       window.alert("登录已失效，请重新登录。");
-    }
-
-    if (!authRedirectInProgress) {
-      authRedirectInProgress = true;
-      window.location.href = "/login";
     }
 
     return response;

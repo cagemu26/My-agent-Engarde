@@ -1,7 +1,8 @@
 "use client";
 
-import { createContext, useContext, useState, useEffect, ReactNode } from "react";
-import { buildApiUrl } from "@/lib/api";
+import { createContext, useCallback, useContext, useState, useEffect, ReactNode } from "react";
+import { useRouter } from "next/navigation";
+import { AUTH_EXPIRED_EVENT, buildApiUrl } from "@/lib/api";
 
 export interface AuthUser {
   id: string;
@@ -23,23 +24,58 @@ interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+const AUTH_TOKEN_KEY = "auth_token";
+const AUTH_USER_KEY = "auth_user";
+const AUTH_FREE_PATH_PREFIXES = ["/login", "/register", "/verify-email", "/reset-password"];
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const router = useRouter();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
+  const clearAuthState = useCallback(() => {
+    setToken(null);
+    setUser(null);
+    window.localStorage.removeItem(AUTH_TOKEN_KEY);
+    window.localStorage.removeItem(AUTH_USER_KEY);
+  }, []);
+
   useEffect(() => {
     // Check for stored token on mount
-    const storedToken = localStorage.getItem("auth_token");
-    const storedUser = localStorage.getItem("auth_user");
+    const storedToken = window.localStorage.getItem(AUTH_TOKEN_KEY);
+    const storedUser = window.localStorage.getItem(AUTH_USER_KEY);
 
     if (storedToken && storedUser) {
-      setToken(storedToken);
-      setUser(JSON.parse(storedUser));
+      try {
+        setToken(storedToken);
+        setUser(JSON.parse(storedUser));
+      } catch {
+        clearAuthState();
+      }
     }
     setIsLoading(false);
-  }, []);
+  }, [clearAuthState]);
+
+  useEffect(() => {
+    const handleAuthExpired = () => {
+      clearAuthState();
+      const pathname = window.location.pathname;
+      const onAuthFreePage = AUTH_FREE_PATH_PREFIXES.some((prefix) => pathname.startsWith(prefix));
+      if (onAuthFreePage) {
+        return;
+      }
+
+      const nextPath = `${pathname}${window.location.search || ""}`;
+      const loginPath = nextPath ? `/login?next=${encodeURIComponent(nextPath)}` : "/login";
+      router.replace(loginPath);
+    };
+
+    window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
+    return () => {
+      window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
+    };
+  }, [clearAuthState, router]);
 
   const login = async (email: string, password: string) => {
     const response = await fetch(buildApiUrl("/api/auth/login"), {
@@ -58,8 +94,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const data = await response.json();
     setToken(data.access_token);
     setUser(data.user);
-    localStorage.setItem("auth_token", data.access_token);
-    localStorage.setItem("auth_user", JSON.stringify(data.user));
+    window.localStorage.setItem(AUTH_TOKEN_KEY, data.access_token);
+    window.localStorage.setItem(AUTH_USER_KEY, JSON.stringify(data.user));
   };
 
   const register = async (email: string, username: string, password: string, invitationCode: string) => {
@@ -78,10 +114,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const logout = () => {
-    setToken(null);
-    setUser(null);
-    localStorage.removeItem("auth_token");
-    localStorage.removeItem("auth_user");
+    clearAuthState();
   };
 
   return (

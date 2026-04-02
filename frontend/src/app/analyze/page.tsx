@@ -472,12 +472,33 @@ function AnalyzeContent() {
   const processingProgressTimerRef = useRef<number | null>(null);
   const hasInitializedDefaultSessionRef = useRef(false);
   const selectedHistoryVideoIdRef = useRef<string | null>(null);
+  const historyDetailAbortRef = useRef<AbortController | null>(null);
+  const activeStreamAbortRef = useRef<AbortController | null>(null);
+  const activeStreamIdRef = useRef(0);
 
   const beginContextTransition = useCallback(() => {
     const transitionId = contextTransitionRef.current + 1;
     contextTransitionRef.current = transitionId;
     setIsContextPreparing(true);
     return transitionId;
+  }, []);
+
+  const cancelActiveChatStream = useCallback((options?: { resetTyping?: boolean }) => {
+    activeStreamIdRef.current += 1;
+    if (activeStreamAbortRef.current) {
+      activeStreamAbortRef.current.abort();
+      activeStreamAbortRef.current = null;
+    }
+    if (options?.resetTyping) {
+      setIsTyping(false);
+    }
+  }, []);
+
+  const cancelHistoryDetailRequest = useCallback(() => {
+    if (historyDetailAbortRef.current) {
+      historyDetailAbortRef.current.abort();
+      historyDetailAbortRef.current = null;
+    }
   }, []);
 
   const historyAthleteSlots = useMemo(
@@ -521,6 +542,13 @@ function AnalyzeContent() {
   useEffect(() => {
     return () => stopProcessingProgress();
   }, [stopProcessingProgress]);
+
+  useEffect(() => {
+    return () => {
+      cancelActiveChatStream();
+      cancelHistoryDetailRequest();
+    };
+  }, [cancelActiveChatStream, cancelHistoryDetailRequest]);
 
   useEffect(() => {
     selectedHistoryVideoIdRef.current = selectedHistoryVideoId;
@@ -902,6 +930,8 @@ function AnalyzeContent() {
   const activateChatSessionById = useCallback(
     async (sessionId: string, options?: { switchToChat?: boolean }) => {
       if (!sessionId) return;
+      cancelActiveChatStream({ resetTyping: true });
+      cancelHistoryDetailRequest();
       const switchId = chatSessionSwitchRef.current + 1;
       const transitionId = beginContextTransition();
       chatSessionSwitchRef.current = switchId;
@@ -1105,6 +1135,8 @@ function AnalyzeContent() {
     [
       beginContextTransition,
       buildContextArtifacts,
+      cancelActiveChatStream,
+      cancelHistoryDetailRequest,
       fetchChatSessions,
       listBackendChatSessions,
       loadBackendChatSessionDetail,
@@ -1121,6 +1153,8 @@ function AnalyzeContent() {
       title?: string;
       contextSummary?: string;
     }) => {
+      cancelActiveChatStream({ resetTyping: true });
+      cancelHistoryDetailRequest();
       let requestedSessionId: string | null = null;
       const transitionId = beginContextTransition();
       setActiveChatVideoId(null);
@@ -1185,6 +1219,8 @@ function AnalyzeContent() {
     },
     [
       beginContextTransition,
+      cancelActiveChatStream,
+      cancelHistoryDetailRequest,
       fetchChatSessions,
       loadBackendChatSessionDetail,
       resolveBackendChatSession,
@@ -1212,22 +1248,40 @@ function AnalyzeContent() {
     async (
       videoId: string,
       athleteSlot?: AthleteSlot,
+      signal?: AbortSignal,
     ): Promise<{ video: HistoryItem; pose: PoseData | null; report: AnalysisReportRecord | null }> => {
-      const videoResponse = await authFetch(`/video/${videoId}`);
+      const isAbortError = (error: unknown) =>
+        (error instanceof DOMException && error.name === "AbortError") ||
+        (error instanceof Error && error.name === "AbortError");
+      const throwIfAborted = () => {
+        if (signal?.aborted) {
+          throw new DOMException("History detail request aborted", "AbortError");
+        }
+      };
+
+      throwIfAborted();
+      const videoResponse = await authFetch(`/video/${videoId}`, { signal });
+      throwIfAborted();
       if (!videoResponse.ok) {
         throw new Error("Failed to fetch video details");
       }
       const video = (await videoResponse.json()) as HistoryItem;
+      throwIfAborted();
 
       let pose: PoseData | null = null;
       let report: AnalysisReportRecord | null = null;
 
       try {
-        const poseResponse = await authFetch(`/video/${videoId}/pose-data`);
+        const poseResponse = await authFetch(`/video/${videoId}/pose-data`, { signal });
+        throwIfAborted();
         if (poseResponse.ok) {
           pose = (await poseResponse.json()) as PoseData;
+          throwIfAborted();
         }
-      } catch {
+      } catch (error) {
+        if (isAbortError(error)) {
+          throw error;
+        }
         pose = null;
       }
 
@@ -1238,8 +1292,12 @@ function AnalyzeContent() {
             athleteSlot: resolvedSlot,
             generateIfMissing: false,
           });
+          throwIfAborted();
         }
-      } catch {
+      } catch (error) {
+        if (isAbortError(error)) {
+          throw error;
+        }
         report = null;
       }
 
@@ -1253,16 +1311,25 @@ function AnalyzeContent() {
       videoId: string,
       athleteSlot?: AthleteSlot,
     ): Promise<{ video: HistoryItem; pose: PoseData | null; report: AnalysisReportRecord | null } | null> => {
+      const isAbortError = (error: unknown) =>
+        (error instanceof DOMException && error.name === "AbortError") ||
+        (error instanceof Error && error.name === "AbortError");
+      cancelHistoryDetailRequest();
+      const abortController = new AbortController();
+      historyDetailAbortRef.current = abortController;
+
       const requestId = historyDetailRequestRef.current + 1;
       historyDetailRequestRef.current = requestId;
+      const isCurrentRequest = () =>
+        requestId === historyDetailRequestRef.current && !abortController.signal.aborted;
       try {
         setHistoryDetailLoading(true);
         setHistoryDetailError(null);
         setHistoryReportError(null);
         setHistoryReport(readCachedAnalysisReport<AnalysisReportRecord>(videoId, athleteSlot));
 
-        const contextData = await fetchVideoContextData(videoId, athleteSlot);
-        if (requestId !== historyDetailRequestRef.current) {
+        const contextData = await fetchVideoContextData(videoId, athleteSlot, abortController.signal);
+        if (!isCurrentRequest()) {
           return null;
         }
         const resolvedSlot = athleteSlot ?? getDefaultAthleteSlot(contextData.pose);
@@ -1272,7 +1339,7 @@ function AnalyzeContent() {
         setHistoryReport(contextData.report);
         return contextData;
       } catch (err) {
-        if (requestId !== historyDetailRequestRef.current) {
+        if (isAbortError(err) || !isCurrentRequest()) {
           return null;
         }
         setHistoryDetailError(err instanceof Error ? err.message : "Failed to load history detail");
@@ -1285,9 +1352,12 @@ function AnalyzeContent() {
         if (requestId === historyDetailRequestRef.current) {
           setHistoryDetailLoading(false);
         }
+        if (historyDetailAbortRef.current === abortController) {
+          historyDetailAbortRef.current = null;
+        }
       }
     },
-    [fetchVideoContextData],
+    [cancelHistoryDetailRequest, fetchVideoContextData],
   );
 
   useEffect(() => {
@@ -1418,6 +1488,8 @@ function AnalyzeContent() {
       },
     ) => {
       if (!videoId) return;
+      cancelActiveChatStream({ resetTyping: true });
+      cancelHistoryDetailRequest();
       let requestedSessionId: string | null = null;
 
       const switchId = sessionSwitchRef.current + 1;
@@ -1539,6 +1611,8 @@ function AnalyzeContent() {
       beginContextTransition,
       buildContextArtifacts,
       buildHandoffMessage,
+      cancelActiveChatStream,
+      cancelHistoryDetailRequest,
       fetchChatSessions,
       fetchVideoContextData,
       loadBackendChatSessionDetail,
@@ -1775,6 +1849,8 @@ function AnalyzeContent() {
 
   const handleOpenVideoDetail = useCallback(
     (videoId: string) => {
+      cancelActiveChatStream({ resetTyping: true });
+      cancelHistoryDetailRequest();
       contextTransitionRef.current += 1;
       suppressUrlSessionRestoreRef.current = true;
       hasInitializedDefaultSessionRef.current = true;
@@ -1786,10 +1862,12 @@ function AnalyzeContent() {
         await activateVideoChatSession(videoId, { preloaded });
       })();
     },
-    [activateVideoChatSession, loadHistoryDetail],
+    [activateVideoChatSession, cancelActiveChatStream, cancelHistoryDetailRequest, loadHistoryDetail],
   );
 
   const handleEnterVideoAnalysis = useCallback(() => {
+    cancelActiveChatStream({ resetTyping: true });
+    cancelHistoryDetailRequest();
     // Cancel in-flight context switches/detail loads so stale responses cannot override this intent.
     chatSessionSwitchRef.current += 1;
     sessionSwitchRef.current += 1;
@@ -1834,7 +1912,7 @@ function AnalyzeContent() {
     setHistoryReportError(null);
 
     syncAnalyzeSessionUrl(null);
-  }, [syncAnalyzeSessionUrl]);
+  }, [cancelActiveChatStream, cancelHistoryDetailRequest, syncAnalyzeSessionUrl]);
 
   const handleSelectChatSession = useCallback(
     (sessionId: string) => {
@@ -2202,6 +2280,20 @@ function AnalyzeContent() {
       setMessages(nextMessages);
       setIsTyping(true);
 
+      const streamId = activeStreamIdRef.current + 1;
+      activeStreamIdRef.current = streamId;
+      if (activeStreamAbortRef.current) {
+        activeStreamAbortRef.current.abort();
+      }
+      const streamAbortController = new AbortController();
+      activeStreamAbortRef.current = streamAbortController;
+
+      const isActiveStream = () =>
+        streamId === activeStreamIdRef.current && !streamAbortController.signal.aborted;
+      const isAbortError = (error: unknown) =>
+        (error instanceof DOMException && error.name === "AbortError") ||
+        (error instanceof Error && error.name === "AbortError");
+
       try {
         const recentMessages = nextMessages.slice(-MAX_BACKEND_SESSION_MESSAGES);
         let contextPayload: string | undefined;
@@ -2210,6 +2302,7 @@ function AnalyzeContent() {
         if (activeChatVideoId) {
           if (needsFullContextForNextSend) {
             const fullContext = await ensureActiveVideoContext();
+            if (!isActiveStream()) return;
             if (fullContext?.contextString) {
               contextPayload = fullContext.contextString;
               setChatContextSummary(fullContext.contextSummary);
@@ -2235,6 +2328,7 @@ function AnalyzeContent() {
                 : `Chat ${new Date().toLocaleDateString()}`,
             contextSummary: contextPayload || "",
           });
+          if (!isActiveStream()) return;
           if (createdSession?.id) {
             sessionIdForSend = createdSession.id;
             setActiveChatSessionId(createdSession.id);
@@ -2262,14 +2356,17 @@ function AnalyzeContent() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
+          signal: streamAbortController.signal,
         };
 
         const sendNonStreamFallback = async () => {
           const response = await authFetch("/chat", requestInit);
+          if (!isActiveStream()) return;
           if (!response.ok) {
             throw new Error("Failed to send message");
           }
           const data = await response.json();
+          if (!isActiveStream()) return;
           const updatedMessages = [...nextMessages, { role: "assistant" as const, content: data.message }];
           setMessages(updatedMessages);
           if (typeof data.session_id === "string" && data.session_id) {
@@ -2280,10 +2377,12 @@ function AnalyzeContent() {
         };
 
         const streamResponse = await authFetch("/chat/stream", requestInit);
+        if (!isActiveStream()) return;
         const streamContentType = streamResponse.headers.get("content-type") || "";
         const shouldUseStream = streamResponse.ok && Boolean(streamResponse.body) && streamContentType.includes("text/event-stream");
         if (!shouldUseStream) {
           await sendNonStreamFallback();
+          if (!isActiveStream()) return;
           setIsTyping(false);
           setNeedsFullContextForNextSend(false);
           setNeedsExternalContextForNextSend(false);
@@ -2292,6 +2391,7 @@ function AnalyzeContent() {
         }
 
         const assistantBase = [...nextMessages, { role: "assistant" as const, content: "" }];
+        if (!isActiveStream()) return;
         setMessages(assistantBase);
 
         let streamedAssistant = "";
@@ -2300,6 +2400,7 @@ function AnalyzeContent() {
         let streamErrorMessage: string | null = null;
 
         const applyAssistantText = (text: string) => {
+          if (!isActiveStream()) return;
           setMessages([...nextMessages, { role: "assistant" as const, content: text }]);
         };
 
@@ -2366,7 +2467,7 @@ function AnalyzeContent() {
         const decoder = new TextDecoder("utf-8");
         let buffer = "";
 
-        while (true) {
+        while (isActiveStream()) {
           const { value, done } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
@@ -2381,6 +2482,7 @@ function AnalyzeContent() {
             splitIndex = buffer.indexOf("\n\n");
           }
         }
+        if (!isActiveStream()) return;
         buffer += decoder.decode();
         const trailingBlock = buffer.trim();
         if (trailingBlock) {
@@ -2400,6 +2502,7 @@ function AnalyzeContent() {
           throw new Error("Failed to receive streamed response");
         }
 
+        if (!isActiveStream()) return;
         setIsTyping(false);
         if (typeof resolvedSessionId === "string" && resolvedSessionId) {
           setActiveChatSessionId(resolvedSessionId);
@@ -2409,7 +2512,10 @@ function AnalyzeContent() {
         setNeedsFullContextForNextSend(false);
         setNeedsExternalContextForNextSend(false);
         void fetchChatSessions({ silent: true });
-      } catch {
+      } catch (error) {
+        if (isAbortError(error) || !isActiveStream()) {
+          return;
+        }
         setIsTyping(false);
         setMessages([
           ...nextMessages,
@@ -2418,6 +2524,13 @@ function AnalyzeContent() {
             content: "Sorry, I encountered an error. Please try again.",
           },
         ]);
+      } finally {
+        if (
+          activeStreamIdRef.current === streamId &&
+          activeStreamAbortRef.current === streamAbortController
+        ) {
+          activeStreamAbortRef.current = null;
+        }
       }
     },
     [
@@ -2471,6 +2584,8 @@ function AnalyzeContent() {
   );
 
   const handleNewChatSession = useCallback(() => {
+    cancelActiveChatStream({ resetTyping: true });
+    cancelHistoryDetailRequest();
     chatSessionSwitchRef.current += 1;
     sessionSwitchRef.current += 1;
     historyDetailRequestRef.current += 1;
@@ -2512,7 +2627,7 @@ function AnalyzeContent() {
     setPendingAutoQuestion(null);
 
     syncAnalyzeSessionUrl(null);
-  }, [syncAnalyzeSessionUrl]);
+  }, [cancelActiveChatStream, cancelHistoryDetailRequest, syncAnalyzeSessionUrl]);
 
   const handleDeleteChatSession = useCallback(
     async (session: ChatSessionRecord) => {

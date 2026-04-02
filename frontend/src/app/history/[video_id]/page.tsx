@@ -65,6 +65,10 @@ type ReplayMode = "original" | "skeleton";
 type HandSide = "left" | "right";
 type DominantSideMode = "auto" | HandSide;
 
+const isAbortError = (error: unknown): boolean =>
+  (error instanceof DOMException && error.name === "AbortError") ||
+  (error instanceof Error && error.name === "AbortError");
+
 const POSE_INDEX = {
   nose: 0,
   left_shoulder: 11,
@@ -497,6 +501,9 @@ export default function VideoDetail() {
   const [dominantSideMode, setDominantSideMode] = useState<DominantSideMode>("auto");
   const [isDominantHintOpen, setIsDominantHintOpen] = useState(false);
   const dominantHintRef = useRef<HTMLDivElement | null>(null);
+  const detailFetchAbortRef = useRef<AbortController | null>(null);
+  const detailFetchRequestIdRef = useRef(0);
+  const skeletonFetchAbortRef = useRef<AbortController | null>(null);
 
   const availableAthleteSlots = useMemo(
     () => getAvailableAthleteSlots(poseData),
@@ -508,6 +515,16 @@ export default function VideoDetail() {
   );
 
   const fetchVideoData = useCallback(async () => {
+    if (detailFetchAbortRef.current) {
+      detailFetchAbortRef.current.abort();
+    }
+    const abortController = new AbortController();
+    detailFetchAbortRef.current = abortController;
+    const requestId = detailFetchRequestIdRef.current + 1;
+    detailFetchRequestIdRef.current = requestId;
+    const isCurrentRequest = () =>
+      requestId === detailFetchRequestIdRef.current && !abortController.signal.aborted;
+
     try {
       setLoading(true);
       setError(null);
@@ -515,30 +532,52 @@ export default function VideoDetail() {
       setReport(readCachedAnalysisReport<AnalysisReport>(videoId));
 
       // Fetch video metadata
-      const videoResponse = await authFetch(`/video/${videoId}`);
+      const videoResponse = await authFetch(`/video/${videoId}`, {
+        signal: abortController.signal,
+      });
+      if (!isCurrentRequest()) {
+        return;
+      }
       if (!videoResponse.ok) {
         throw new Error("Failed to fetch video");
       }
       const videoData = await videoResponse.json();
+      if (!isCurrentRequest()) {
+        return;
+      }
       setVideo(videoData);
 
       // Fetch pose data (if available)
       let nextPoseData: PoseData | null = null;
       try {
-        const poseResponse = await authFetch(`/video/${videoId}/pose-data`);
+        const poseResponse = await authFetch(`/video/${videoId}/pose-data`, {
+          signal: abortController.signal,
+        });
+        if (!isCurrentRequest()) {
+          return;
+        }
         if (poseResponse.ok) {
           nextPoseData = (await poseResponse.json()) as PoseData;
+          if (!isCurrentRequest()) {
+            return;
+          }
           setPoseData(nextPoseData);
           setSelectedAthleteSlot(getDefaultAthleteSlot(nextPoseData));
         } else {
           setPoseData(null);
         }
-      } catch {
+      } catch (error) {
+        if (isAbortError(error)) {
+          return;
+        }
         setPoseData(null);
       }
 
       try {
         if (nextPoseData) {
+          if (!isCurrentRequest()) {
+            return;
+          }
           setReportLoading(true);
           setReportAction("load");
           const defaultSlot = getDefaultAthleteSlot(nextPoseData);
@@ -546,22 +585,38 @@ export default function VideoDetail() {
             athleteSlot: defaultSlot,
             generateIfMissing: false,
           });
+          if (!isCurrentRequest()) {
+            return;
+          }
           setReport(reportData);
         } else {
           setReport(null);
         }
       } catch (err) {
+        if (isAbortError(err) || !isCurrentRequest()) {
+          return;
+        }
         setReport(null);
         setReportError(err instanceof Error ? err.message : "Failed to fetch report");
       } finally {
-        setReportLoading(false);
-        setReportAction(null);
+        if (isCurrentRequest()) {
+          setReportLoading(false);
+          setReportAction(null);
+        }
       }
 
     } catch (err) {
+      if (isAbortError(err) || !isCurrentRequest()) {
+        return;
+      }
       setError(err instanceof Error ? err.message : "Failed to load video");
     } finally {
-      setLoading(false);
+      if (requestId === detailFetchRequestIdRef.current) {
+        setLoading(false);
+      }
+      if (detailFetchAbortRef.current === abortController) {
+        detailFetchAbortRef.current = null;
+      }
     }
   }, [videoId]);
 
@@ -570,6 +625,19 @@ export default function VideoDetail() {
       fetchVideoData();
     }
   }, [videoId, fetchVideoData]);
+
+  useEffect(() => {
+    return () => {
+      if (detailFetchAbortRef.current) {
+        detailFetchAbortRef.current.abort();
+        detailFetchAbortRef.current = null;
+      }
+      if (skeletonFetchAbortRef.current) {
+        skeletonFetchAbortRef.current.abort();
+        skeletonFetchAbortRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined" || !videoId) {
@@ -695,19 +763,39 @@ export default function VideoDetail() {
       return;
     }
 
+    if (skeletonFetchAbortRef.current) {
+      skeletonFetchAbortRef.current.abort();
+    }
+    const abortController = new AbortController();
+    skeletonFetchAbortRef.current = abortController;
+
     try {
       setSkeletonLoading(true);
       setSkeletonError(null);
-      const response = await authFetch(`/video/${videoId}/pose-overlay`);
+      const response = await authFetch(`/video/${videoId}/pose-overlay`, {
+        signal: abortController.signal,
+      });
+      if (abortController.signal.aborted) {
+        return;
+      }
       if (!response.ok) {
         throw new Error("Failed to prepare skeleton replay");
       }
       await response.json();
+      if (abortController.signal.aborted) {
+        return;
+      }
       setSkeletonReady(true);
     } catch (err) {
+      if (isAbortError(err)) {
+        return;
+      }
       setSkeletonError(err instanceof Error ? err.message : "Failed to prepare skeleton replay");
     } finally {
-      setSkeletonLoading(false);
+      if (skeletonFetchAbortRef.current === abortController) {
+        setSkeletonLoading(false);
+        skeletonFetchAbortRef.current = null;
+      }
     }
   }, [skeletonLoading, skeletonReady, videoId]);
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
@@ -33,6 +33,8 @@ export default function FeedbackAdminPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [filter, setFilter] = useState<string>("all");
+  const feedbacksFetchAbortRef = useRef<AbortController | null>(null);
+  const feedbacksFetchRequestIdRef = useRef(0);
 
   useEffect(() => {
     if (!isLoading && (!user || !user.is_admin)) {
@@ -42,6 +44,14 @@ export default function FeedbackAdminPage() {
 
   const fetchFeedbacks = useCallback(async () => {
     if (!token) return;
+    if (feedbacksFetchAbortRef.current) {
+      feedbacksFetchAbortRef.current.abort();
+    }
+    const abortController = new AbortController();
+    feedbacksFetchAbortRef.current = abortController;
+    const requestId = feedbacksFetchRequestIdRef.current + 1;
+    feedbacksFetchRequestIdRef.current = requestId;
+
     try {
       const url =
         filter === "all"
@@ -52,16 +62,36 @@ export default function FeedbackAdminPage() {
         headers: {
           Authorization: `Bearer ${token}`,
         },
+        signal: abortController.signal,
       });
+      if (abortController.signal.aborted || requestId !== feedbacksFetchRequestIdRef.current) {
+        return;
+      }
       if (!response.ok) {
         throw new Error("Failed to fetch feedbacks");
       }
       const data = await response.json();
+      if (abortController.signal.aborted || requestId !== feedbacksFetchRequestIdRef.current) {
+        return;
+      }
       setFeedbacks(data);
+      setError("");
     } catch (err) {
+      if (
+        (err instanceof DOMException && err.name === "AbortError") ||
+        (err instanceof Error && err.name === "AbortError") ||
+        requestId !== feedbacksFetchRequestIdRef.current
+      ) {
+        return;
+      }
       setError(err instanceof Error ? err.message : "An error occurred");
     } finally {
-      setLoading(false);
+      if (requestId === feedbacksFetchRequestIdRef.current) {
+        setLoading(false);
+      }
+      if (feedbacksFetchAbortRef.current === abortController) {
+        feedbacksFetchAbortRef.current = null;
+      }
     }
   }, [filter, token]);
 
@@ -70,6 +100,15 @@ export default function FeedbackAdminPage() {
       fetchFeedbacks();
     }
   }, [user, token, fetchFeedbacks]);
+
+  useEffect(() => {
+    return () => {
+      if (feedbacksFetchAbortRef.current) {
+        feedbacksFetchAbortRef.current.abort();
+        feedbacksFetchAbortRef.current = null;
+      }
+    };
+  }, []);
 
   const updateStatus = async (feedbackId: string, status: string) => {
     try {

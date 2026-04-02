@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
@@ -33,6 +33,8 @@ export default function InvitationsPage() {
   const [success, setSuccess] = useState("");
   const [isCreating, setIsCreating] = useState(false);
   const [daysValid, setDaysValid] = useState(30);
+  const invitationsFetchAbortRef = useRef<AbortController | null>(null);
+  const invitationsFetchRequestIdRef = useRef(0);
 
   useEffect(() => {
     if (!isLoading && (!user || !user.is_admin)) {
@@ -42,21 +44,49 @@ export default function InvitationsPage() {
 
   const fetchInvitations = useCallback(async () => {
     if (!token) return;
+    if (invitationsFetchAbortRef.current) {
+      invitationsFetchAbortRef.current.abort();
+    }
+    const abortController = new AbortController();
+    invitationsFetchAbortRef.current = abortController;
+    const requestId = invitationsFetchRequestIdRef.current + 1;
+    invitationsFetchRequestIdRef.current = requestId;
+
     try {
       const response = await fetch(buildApiUrl("/api/admin/invitations"), {
         headers: {
           Authorization: `Bearer ${token}`,
         },
+        signal: abortController.signal,
       });
+      if (abortController.signal.aborted || requestId !== invitationsFetchRequestIdRef.current) {
+        return;
+      }
       if (!response.ok) {
         throw new Error("Failed to fetch invitations");
       }
       const data = await response.json();
+      if (abortController.signal.aborted || requestId !== invitationsFetchRequestIdRef.current) {
+        return;
+      }
       setInvitations(data);
+      setError("");
     } catch (err) {
+      if (
+        (err instanceof DOMException && err.name === "AbortError") ||
+        (err instanceof Error && err.name === "AbortError") ||
+        requestId !== invitationsFetchRequestIdRef.current
+      ) {
+        return;
+      }
       setError(err instanceof Error ? err.message : "An error occurred");
     } finally {
-      setLoading(false);
+      if (requestId === invitationsFetchRequestIdRef.current) {
+        setLoading(false);
+      }
+      if (invitationsFetchAbortRef.current === abortController) {
+        invitationsFetchAbortRef.current = null;
+      }
     }
   }, [token]);
 
@@ -65,6 +95,15 @@ export default function InvitationsPage() {
       fetchInvitations();
     }
   }, [user, token, fetchInvitations]);
+
+  useEffect(() => {
+    return () => {
+      if (invitationsFetchAbortRef.current) {
+        invitationsFetchAbortRef.current.abort();
+        invitationsFetchAbortRef.current = null;
+      }
+    };
+  }, []);
 
   const createInvitations = async (count: number) => {
     setIsCreating(true);

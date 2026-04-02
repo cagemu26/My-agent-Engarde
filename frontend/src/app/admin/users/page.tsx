@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
@@ -31,6 +31,8 @@ export default function UsersPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const usersFetchAbortRef = useRef<AbortController | null>(null);
+  const usersFetchRequestIdRef = useRef(0);
 
   useEffect(() => {
     if (!isLoading && (!user || !user.is_admin)) {
@@ -40,21 +42,49 @@ export default function UsersPage() {
 
   const fetchUsers = useCallback(async () => {
     if (!token) return;
+    if (usersFetchAbortRef.current) {
+      usersFetchAbortRef.current.abort();
+    }
+    const abortController = new AbortController();
+    usersFetchAbortRef.current = abortController;
+    const requestId = usersFetchRequestIdRef.current + 1;
+    usersFetchRequestIdRef.current = requestId;
+
     try {
       const response = await fetch(buildApiUrl("/api/admin/users"), {
         headers: {
           Authorization: `Bearer ${token}`,
         },
+        signal: abortController.signal,
       });
+      if (abortController.signal.aborted || requestId !== usersFetchRequestIdRef.current) {
+        return;
+      }
       if (!response.ok) {
         throw new Error("Failed to fetch users");
       }
       const data = await response.json();
+      if (abortController.signal.aborted || requestId !== usersFetchRequestIdRef.current) {
+        return;
+      }
       setUsers(data);
+      setError("");
     } catch (err) {
+      if (
+        (err instanceof DOMException && err.name === "AbortError") ||
+        (err instanceof Error && err.name === "AbortError") ||
+        requestId !== usersFetchRequestIdRef.current
+      ) {
+        return;
+      }
       setError(err instanceof Error ? err.message : "An error occurred");
     } finally {
-      setLoading(false);
+      if (requestId === usersFetchRequestIdRef.current) {
+        setLoading(false);
+      }
+      if (usersFetchAbortRef.current === abortController) {
+        usersFetchAbortRef.current = null;
+      }
     }
   }, [token]);
 
@@ -63,6 +93,15 @@ export default function UsersPage() {
       fetchUsers();
     }
   }, [user, token, fetchUsers]);
+
+  useEffect(() => {
+    return () => {
+      if (usersFetchAbortRef.current) {
+        usersFetchAbortRef.current.abort();
+        usersFetchAbortRef.current = null;
+      }
+    };
+  }, []);
 
   const toggleUser = async (userId: string) => {
     try {
