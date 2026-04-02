@@ -16,12 +16,15 @@ from typing import Any, Optional
 import cv2
 import httpx
 import mediapipe as mp
+from sqlalchemy.orm import Session
 from mediapipe.framework.formats import landmark_pb2
 from mediapipe.tasks.python.core.base_options import BaseOptions
 from mediapipe.tasks.python.vision.core.vision_task_running_mode import VisionTaskRunningMode
 from mediapipe.tasks.python.vision.pose_landmarker import PoseLandmarker, PoseLandmarkerOptions
 
 from app.core.config import settings
+from app.models.video import Video
+from app.services.storage import storage_service
 
 
 SCHEMA_VERSION = 2
@@ -87,16 +90,17 @@ class PoseAnalysisService:
         self.model_path = Path(settings.POSE_LANDMARKER_MODEL_PATH)
         self.model_url = settings.POSE_LANDMARKER_MODEL_URL
 
-    def _get_analysis_dir(self, video_id: str) -> Path:
-        video_analysis_dir = self.analysis_dir / video_id / "pose"
+    def _get_analysis_dir(self, video_id: str, output_dir: Optional[Path] = None) -> Path:
+        base_dir = output_dir or (self.analysis_dir / video_id / "pose")
+        video_analysis_dir = Path(base_dir)
         video_analysis_dir.mkdir(parents=True, exist_ok=True)
         return video_analysis_dir
 
-    def _get_pose_data_path(self, video_id: str) -> Path:
-        return self._get_analysis_dir(video_id) / "pose_data.json"
+    def _get_pose_data_path(self, video_id: str, output_dir: Optional[Path] = None) -> Path:
+        return self._get_analysis_dir(video_id, output_dir=output_dir) / "pose_data.json"
 
-    def _get_overlay_video_path(self, video_id: str) -> Path:
-        return self._get_analysis_dir(video_id) / "pose_overlay.mp4"
+    def _get_overlay_video_path(self, video_id: str, output_dir: Optional[Path] = None) -> Path:
+        return self._get_analysis_dir(video_id, output_dir=output_dir) / "pose_overlay.mp4"
 
     def _ensure_model_asset(self) -> Path:
         if self.model_path.exists():
@@ -469,6 +473,7 @@ class PoseAnalysisService:
         video_path: str,
         video_id: str,
         sample_interval: int = 1,
+        output_dir: Optional[str] = None,
     ) -> dict[str, Any]:
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
@@ -538,7 +543,8 @@ class PoseAnalysisService:
                 close()
             cap.release()
 
-        pose_data_path = self._get_pose_data_path(video_id)
+        target_output_dir = Path(output_dir) if output_dir else None
+        pose_data_path = self._get_pose_data_path(video_id, output_dir=target_output_dir)
         analysis_result = {
             "video_id": video_id,
             "video_path": video_path,
@@ -605,13 +611,14 @@ class PoseAnalysisService:
         pose_data: Optional[dict[str, Any]] = None,
         sample_interval: int = 5,
         output_format: str = "mp4",
+        output_dir: Optional[str] = None,
     ) -> str:
         del sample_interval, output_format
 
         if pose_data is None:
             pose_data = self.get_pose_data(video_id)
             if pose_data is None:
-                pose_data = self.analyze_pose(video_path, video_id)
+                pose_data = self.analyze_pose(video_path, video_id, output_dir=output_dir)
 
         normalized_pose_data = self.normalize_pose_data(pose_data)
         pose_by_frame = {
@@ -626,7 +633,8 @@ class PoseAnalysisService:
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        output_path = self._get_overlay_video_path(video_id)
+        target_output_dir = Path(output_dir) if output_dir else None
+        output_path = self._get_overlay_video_path(video_id, output_dir=target_output_dir)
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         out = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
 
@@ -650,7 +658,32 @@ class PoseAnalysisService:
         print(f"Pose overlay video saved to: {output_path}")
         return str(output_path)
 
-    def get_pose_data(self, video_id: str) -> Optional[dict[str, Any]]:
+    def get_pose_data(self, video_id: str, db: Optional[Session] = None) -> Optional[dict[str, Any]]:
+        if db is not None:
+            video_record = db.query(Video).filter(Video.id == video_id).first()
+            if (
+                video_record
+                and video_record.pose_data_bucket
+                and video_record.pose_data_key
+                and storage_service.provider.object_exists(
+                    bucket=video_record.pose_data_bucket,
+                    key=video_record.pose_data_key,
+                )
+            ):
+                temp_dir = storage_service.make_temp_dir(prefix=f"pose-data-{video_id}")
+                try:
+                    local_path = storage_service.provider.download_to_temp(
+                        bucket=video_record.pose_data_bucket,
+                        key=video_record.pose_data_key,
+                        temp_dir=temp_dir,
+                        filename="pose_data.json",
+                    )
+                    with open(local_path, encoding="utf-8") as file_handle:
+                        raw_pose_data = json.load(file_handle)
+                    return self.normalize_pose_data(raw_pose_data)
+                finally:
+                    storage_service.cleanup_temp_dir(temp_dir)
+
         pose_data_path = self._get_pose_data_path(video_id)
         if not pose_data_path.exists():
             return None

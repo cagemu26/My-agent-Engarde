@@ -1,128 +1,157 @@
-import os
+from __future__ import annotations
+
 import json
+import os
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from datetime import datetime
+
 from fastapi import UploadFile
+
 from app.core.config import settings
+from app.models.video import Video
+from app.services.storage import storage_service
 
 
 class VideoService:
-    def __init__(self):
+    def __init__(self) -> None:
+        # Legacy local filesystem paths (kept for migration and fallback compatibility).
         self.upload_dir = Path(settings.VIDEO_UPLOAD_DIR)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.metadata_dir = self.upload_dir / "metadata"
         self.metadata_dir.mkdir(parents=True, exist_ok=True)
 
+    def new_video_id(self) -> str:
+        return str(uuid.uuid4())
+
     def _get_metadata_path(self, video_id: str) -> Path:
-        """Get the path for video metadata file"""
         return self.metadata_dir / f"{video_id}.json"
 
+    def _raw_prefix(self) -> str:
+        return settings.COS_RAW_PREFIX or "raw"
+
+    def _derived_prefix(self) -> str:
+        return settings.COS_DERIVED_PREFIX or "derived"
+
+    def build_source_key(self, *, user_id: str, video_id: str, original_filename: str) -> str:
+        filename = storage_service.safe_filename(original_filename or f"{video_id}.mp4")
+        path = f"users/{user_id}/videos/{video_id}/{self._raw_prefix()}/{filename}"
+        return storage_service.normalize_key(path)
+
+    def build_pose_data_key(self, *, user_id: str, video_id: str) -> str:
+        path = f"users/{user_id}/videos/{video_id}/{self._derived_prefix()}/pose_data.json"
+        return storage_service.normalize_key(path)
+
+    def build_overlay_key(self, *, user_id: str, video_id: str) -> str:
+        path = f"users/{user_id}/videos/{video_id}/{self._derived_prefix()}/pose_overlay.mp4"
+        return storage_service.normalize_key(path)
+
+    def make_storage_uri(self, *, bucket: str, key: str) -> str:
+        provider = storage_service.provider_name
+        if provider == "cos":
+            return f"cos://{bucket}/{key}"
+        return f"local://{bucket}/{key}"
+
+    def to_metadata_dict(self, video: Video) -> dict:
+        return {
+            "video_id": video.id,
+            "title": video.title or video.original_filename or video.id,
+            "athlete": video.athlete or "",
+            "opponent": video.opponent or "",
+            "weapon": video.weapon or "epee",
+            "match_result": video.match_result or "",
+            "score": video.score or "",
+            "tournament": video.tournament or "",
+            "notes": video.notes or "",
+            "filename": video.original_filename or "",
+            "original_filename": video.original_filename or "",
+            "content_type": video.content_type or "",
+            "file_size": video.file_size or 0,
+            "upload_status": video.upload_status,
+            "pose_status": video.pose_status,
+            "report_status": video.report_status,
+            "source_bucket": video.source_bucket,
+            "source_key": video.source_key,
+            "overlay_bucket": video.overlay_bucket,
+            "overlay_key": video.overlay_key,
+            "pose_data_bucket": video.pose_data_bucket,
+            "pose_data_key": video.pose_data_key,
+            "user_id": str(video.user_id),
+            "upload_time": video.created_at.isoformat() if video.created_at else None,
+            "created_at": video.created_at.isoformat() if video.created_at else None,
+            "updated_at": video.updated_at.isoformat() if video.updated_at else None,
+            "file_path": self.make_storage_uri(
+                bucket=video.source_bucket or storage_service.default_bucket,
+                key=video.source_key or "",
+            )
+            if video.source_key
+            else None,
+        }
+
+    # ---------------------------------------------------------------------
+    # Legacy local storage methods (fallback only)
+    # ---------------------------------------------------------------------
     async def save_video(
         self,
         file: UploadFile,
         metadata: Optional[dict] = None,
-        max_size: Optional[int] = None
+        max_size: Optional[int] = None,
     ) -> tuple[str, str, str]:
-        """
-        Save uploaded video file to storage.
-
-        Args:
-            file: Uploaded video file
-            metadata: Optional metadata dictionary
-            max_size: Optional maximum file size in bytes
-
-        Returns:
-            tuple: (video_id, filename, file_path)
-
-        Raises:
-            ValueError: If file exceeds max_size
-        """
-        # Generate unique ID for the video
-        video_id = str(uuid.uuid4())
-
-        # Get file extension
+        video_id = self.new_video_id()
         file_ext = Path(file.filename).suffix or ".mp4"
         filename = f"{video_id}{file_ext}"
         file_path = self.upload_dir / filename
 
-        # Read and validate file size
         content = await file.read()
         if max_size and len(content) > max_size:
-            raise ValueError(f"File too large. Maximum size is {max_size // (1024*1024)}MB")
+            raise ValueError(f"File too large. Maximum size is {max_size // (1024 * 1024)}MB")
 
-        # Save the file
-        with open(file_path, "wb") as f:
-            f.write(content)
+        with open(file_path, "wb") as fh:
+            fh.write(content)
 
-        # Save metadata if provided
         if metadata:
             metadata["video_id"] = video_id
             metadata["filename"] = filename
             metadata["file_path"] = str(file_path)
             metadata["upload_time"] = datetime.now().isoformat()
-
             metadata_path = self._get_metadata_path(video_id)
-            with open(metadata_path, "w", encoding="utf-8") as f:
-                json.dump(metadata, f, ensure_ascii=False, indent=2)
+            with open(metadata_path, "w", encoding="utf-8") as fh:
+                json.dump(metadata, fh, ensure_ascii=False, indent=2)
 
         return video_id, filename, str(file_path)
 
     def get_video_metadata(self, video_id: str) -> Optional[dict]:
-        """Get video metadata by ID"""
         metadata_path = self._get_metadata_path(video_id)
         if metadata_path.exists():
-            with open(metadata_path, encoding="utf-8") as f:
-                return json.load(f)
+            with open(metadata_path, encoding="utf-8") as fh:
+                return json.load(fh)
         return None
 
     def list_videos(self, user_id: Optional[str] = None) -> list[dict]:
-        """List uploaded videos with optional owner filter."""
-        videos = []
+        videos: list[dict] = []
         for metadata_file in self.metadata_dir.glob("*.json"):
             try:
-                with open(metadata_file, encoding="utf-8") as f:
-                    metadata = json.load(f)
+                with open(metadata_file, encoding="utf-8") as fh:
+                    metadata = json.load(fh)
                     if user_id is not None and str(metadata.get("user_id", "")) != str(user_id):
                         continue
                     videos.append(metadata)
             except Exception:
                 continue
 
-        # Sort by upload time (newest first)
-        videos.sort(key=lambda x: x.get("upload_time", ""), reverse=True)
+        videos.sort(key=lambda item: item.get("upload_time", ""), reverse=True)
         return videos
 
-    async def analyze_video(
-        self,
-        video_path: str,
-        weapon: str,
-        depth: int = 3
-    ) -> str:
-        """
-        Analyze the video for fencing technique.
-
-        Args:
-            video_path: Path to the video file
-            weapon: Weapon type (foil, epee, sabre)
-            depth: Analysis depth level
-
-        Returns:
-            str: Analysis result
-        """
-        # TODO: Implement actual video analysis with AI
-        # For now, return a placeholder analysis
-
+    async def analyze_video(self, video_path: str, weapon: str, depth: int = 3) -> str:
         weapon_descriptions = {
             "foil": "Foil fencing emphasizes precision and timing. The target area is the torso.",
-            "epee": "Épée fencing is about the whole body as target. It encourages strategic fencing.",
-            "sabre": "Sabre fencing is about speed and attacks above the waist. Cuts and thrusts are both valid."
+            "epee": "Epee fencing is about the whole body as target. It encourages strategic fencing.",
+            "sabre": "Sabre fencing is about speed and attacks above the waist. Cuts and thrusts are both valid.",
         }
 
         weapon_desc = weapon_descriptions.get(weapon.lower(), "fencing")
-
-        analysis = f"""Video Analysis Complete
+        return f"""Video Analysis Complete
 
 Weapon: {weapon.upper()}
 Analysis Depth: {depth}/5
@@ -141,34 +170,13 @@ Note: This is a basic analysis. For detailed feedback, please consult with a cer
 
 File analyzed: {video_path}"""
 
-        return analysis
-
     def get_video_path(self, video_id: str) -> Optional[str]:
-        """
-        Get the file path for a video by its ID.
-
-        Args:
-            video_id: The video ID
-
-        Returns:
-            str or None: The file path if found
-        """
-        # Search for file with this ID prefix
         for file_path in self.upload_dir.iterdir():
             if file_path.stem == video_id:
                 return str(file_path)
         return None
 
     def delete_video(self, video_id: str) -> bool:
-        """
-        Delete a video file.
-
-        Args:
-            video_id: The video ID
-
-        Returns:
-            bool: True if deleted, False if not found
-        """
         file_path = self.get_video_path(video_id)
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
@@ -176,33 +184,26 @@ File analyzed: {video_path}"""
         return False
 
     def delete_video_assets(self, video_id: str) -> dict:
-        """
-        Delete the uploaded video file and metadata for a video id.
-
-        Returns a summary dictionary for observability.
-        """
         deleted_video = False
         deleted_metadata = False
 
         metadata = self.get_video_metadata(video_id) or {}
         preferred_path = metadata.get("file_path")
-        candidate_paths = []
+        candidate_paths: list[Path] = []
         if preferred_path:
             candidate_paths.append(Path(preferred_path))
 
-        # Fallback: remove all files whose stem matches video_id under upload root.
         for file_path in self.upload_dir.glob(f"{video_id}.*"):
             if file_path.is_file():
                 candidate_paths.append(file_path)
 
-        # De-duplicate candidate paths.
-        unique_paths = []
-        seen = set()
+        unique_paths: list[Path] = []
+        seen: set[str] = set()
         for file_path in candidate_paths:
-            key = str(file_path)
-            if key in seen:
+            raw = str(file_path)
+            if raw in seen:
                 continue
-            seen.add(key)
+            seen.add(raw)
             unique_paths.append(file_path)
 
         for file_path in unique_paths:

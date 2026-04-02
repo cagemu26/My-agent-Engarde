@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.core.auth import verify_token
 from app.core.config import settings
 from app.core.database import get_db
-from app.models import AnalysisReport, ChatMessage as ChatMessageModel, ChatSession, User
+from app.models import AnalysisReport, ChatMessage as ChatMessageModel, ChatSession, User, Video
 from app.schemas import (
     ChatRequest,
     ChatResponse,
@@ -31,6 +31,7 @@ from app.schemas import (
 )
 from app.services.pose_analysis import pose_analysis_service
 from app.services.rag import rag_service
+from app.services.storage import storage_service
 from app.services.video import video_service
 
 
@@ -999,7 +1000,27 @@ def delete_chat_session(
     if not related_session_ids:
         related_session_ids = [chat_session.id]
 
-    # Best-effort filesystem cleanup (video file, metadata, analyses).
+    # Best-effort storage cleanup (COS/object storage first, legacy filesystem fallback).
+    video_record = (
+        db.query(Video)
+        .filter(Video.id == video_id, Video.user_id == current_user.id)
+        .first()
+    )
+    if video_record:
+        object_pairs = [
+            (video_record.source_bucket, video_record.source_key),
+            (video_record.overlay_bucket, video_record.overlay_key),
+            (video_record.pose_data_bucket, video_record.pose_data_key),
+        ]
+        for bucket, key in object_pairs:
+            if not bucket or not key:
+                continue
+            try:
+                storage_service.provider.delete_object(bucket=bucket, key=key)
+            except Exception:
+                pass
+        db.delete(video_record)
+
     video_service.delete_video_assets(video_id)
     pose_analysis_service.delete_analysis_assets(video_id)
 

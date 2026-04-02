@@ -12,6 +12,22 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/fencing_ai"
     REDIS_URL: str = "redis://localhost:6379/0"
 
+    STORAGE_PROVIDER: str = "local"  # local | cos
+    LOCAL_STORAGE_ROOT: str = "./data/storage"
+    LOCAL_STORAGE_BUCKET: str = "local-bucket"
+    LOCAL_TEMP_DIR: str = "/tmp/engarde-ai"
+
+    COS_BUCKET: str = ""
+    COS_REGION: str = ""
+    COS_APP_ID: str = ""
+    COS_SECRET_ID: str = ""
+    COS_SECRET_KEY: str = ""
+    COS_KEY_PREFIX: str = "prod"
+    COS_RAW_PREFIX: str = "raw"
+    COS_DERIVED_PREFIX: str = "derived"
+    COS_STS_EXPIRE_SECONDS: int = 900
+    COS_SIGNED_URL_EXPIRE_SECONDS: int = 900
+
     CHROMA_PERSIST_DIR: str = "./data/chroma"
     KB_DATA_DIR: str = "./knowledge"
     KB_COLLECTION: str = "fencing_knowledge"
@@ -96,6 +112,27 @@ class Settings(BaseSettings):
                 return [str(item).strip() for item in parsed if str(item).strip()]
             return [item.strip() for item in raw.split(",") if item.strip()]
         raise ValueError("Unsupported CORS_ORIGINS format")
+
+    @field_validator("STORAGE_PROVIDER", mode="before")
+    @classmethod
+    def _normalize_storage_provider(cls, value: Any) -> str:
+        normalized = str(value or "local").strip().lower()
+        if normalized not in {"local", "cos"}:
+            raise ValueError("STORAGE_PROVIDER must be either 'local' or 'cos'")
+        return normalized
+
+    @field_validator("COS_KEY_PREFIX", "COS_RAW_PREFIX", "COS_DERIVED_PREFIX", mode="before")
+    @classmethod
+    def _normalize_cos_prefix(cls, value: Any) -> str:
+        return str(value or "").strip().strip("/")
+
+    @field_validator("COS_STS_EXPIRE_SECONDS", "COS_SIGNED_URL_EXPIRE_SECONDS", mode="before")
+    @classmethod
+    def _validate_positive_expire_seconds(cls, value: Any) -> int:
+        parsed = int(value)
+        if parsed <= 0:
+            raise ValueError("COS expiry seconds must be greater than 0")
+        return parsed
 
     class Config:
         env_file = ".env"
