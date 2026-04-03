@@ -2952,6 +2952,42 @@ function AnalyzeContent() {
     return base.sort((a, b) => getSessionTimestamp(b) - getSessionTimestamp(a));
   }, [chatSessions, getSessionSubtitle, getSessionTitle, historyVideoById, sessionSearch]);
 
+  const activeChatSession = useMemo(
+    () => chatSessions.find((session) => session.id === activeChatSessionId) ?? null,
+    [activeChatSessionId, chatSessions],
+  );
+
+  const activeChatSessionType = useMemo<SessionType>(() => {
+    if (activeChatSession) {
+      return normalizeSessionType(activeChatSession.session_type);
+    }
+    if (activeChatVideoId) {
+      return SESSION_TYPE_VIDEO;
+    }
+    if (externalContextStatus) {
+      return SESSION_TYPE_TRAINING;
+    }
+    return SESSION_TYPE_CHAT;
+  }, [activeChatSession, activeChatVideoId, externalContextStatus]);
+
+  const activeChatSessionMeta = SESSION_META[activeChatSessionType];
+
+  const activeChatSessionTitle = activeChatSession
+    ? getSessionTitle(activeChatSession)
+    : activeChatVideoId
+      ? historyVideoById.get(activeChatVideoId)?.title || activeChatSessionMeta.label
+      : activeChatSessionType === SESSION_TYPE_TRAINING
+        ? "Training Analysis"
+        : "Assistant Chat";
+
+  const activeChatSessionSubtitle = activeChatSession
+    ? getSessionSubtitle(activeChatSession)
+    : activeChatVideoId
+      ? "Video coaching thread"
+      : activeChatSessionType === SESSION_TYPE_TRAINING
+        ? "Training record analysis thread"
+        : "General AI Q&A thread";
+
   const groupedChatSessions = useMemo<HistoryGroup[]>(() => {
     const today: ChatSessionRecord[] = [];
     const week: ChatSessionRecord[] = [];
@@ -3780,10 +3816,22 @@ function AnalyzeContent() {
                     )}
                   </div>
 
-                  <div className="mb-3 flex items-center justify-between gap-3">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      {activeChatVideoId ? "Video Thread" : "Chat Thread"}
-                    </p>
+                  <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-semibold ${activeChatSessionMeta.badgeClass}`}
+                        >
+                          {activeChatSessionMeta.label}
+                        </span>
+                        <p className="truncate text-sm font-semibold text-foreground">
+                          {activeChatSessionTitle}
+                        </p>
+                      </div>
+                      <p className="mt-1 truncate text-xs text-muted-foreground">
+                        {activeChatSessionSubtitle}
+                      </p>
+                    </div>
                     <button
                       type="button"
                       onClick={handleNewChatSession}

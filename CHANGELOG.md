@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.1.5 - 2026-04-03
+
+### Overview
+- Fixed history and analyze report flows so pending analysis jobs can resume after navigation, and patched report JSON serialization errors that previously caused detail-page `500` responses.
+- Hardened static CDN integration with validated `assetPrefix` handling, safer deployment guidance, CORS-friendly static headers, and supporting nginx/CDN verification docs.
+- Polished session UI across Analyze and History so all three session types consistently render with their intended colored badges and framed styling.
+
 ## v1.1.4 - 2026-04-02
 
 ### Overview

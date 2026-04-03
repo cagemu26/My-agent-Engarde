@@ -14,19 +14,19 @@ export const SESSION_META: Record<
   [SESSION_TYPE_VIDEO]: {
     label: "Video Analysis",
     badgeClass:
-      "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300",
+      "border border-blue-200 bg-blue-100 text-blue-700 dark:border-blue-800/50 dark:bg-blue-900/30 dark:text-blue-300",
     dotClass: "bg-blue-500",
   },
   [SESSION_TYPE_TRAINING]: {
     label: "Training Analysis",
     badgeClass:
-      "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300",
+      "border border-orange-200 bg-orange-100 text-orange-700 dark:border-orange-800/50 dark:bg-orange-900/30 dark:text-orange-300",
     dotClass: "bg-orange-500",
   },
   [SESSION_TYPE_CHAT]: {
     label: "Chat Q&A",
     badgeClass:
-      "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300",
+      "border border-emerald-200 bg-emerald-100 text-emerald-700 dark:border-emerald-800/50 dark:bg-emerald-900/30 dark:text-emerald-300",
     dotClass: "bg-emerald-500",
   },
 };
