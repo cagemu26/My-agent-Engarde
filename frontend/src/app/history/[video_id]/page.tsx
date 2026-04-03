@@ -582,6 +582,12 @@ export default function VideoDetail() {
         setPoseData(null);
       }
 
+      // Unblock page rendering as soon as core video + pose payload is ready.
+      // Report can continue loading asynchronously in-panel.
+      if (isCurrentRequest()) {
+        setLoading(false);
+      }
+
       try {
         if (nextPoseData) {
           if (!isCurrentRequest()) {

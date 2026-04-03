@@ -1859,7 +1859,13 @@ function AnalyzeContent() {
     (videoId: string) => {
       cancelActiveChatStream({ resetTyping: true });
       cancelHistoryDetailRequest();
+      // Abort any in-flight session/detail transitions so stale async completions
+      // cannot switch the UI back to chat right after opening history detail.
+      chatSessionSwitchRef.current += 1;
+      sessionSwitchRef.current += 1;
+      historyDetailRequestRef.current += 1;
       contextTransitionRef.current += 1;
+      pendingUrlSessionIdRef.current = null;
       suppressUrlSessionRestoreRef.current = true;
       hasInitializedDefaultSessionRef.current = true;
       setSelectedHistoryVideoId(videoId);
@@ -3092,6 +3098,7 @@ function AnalyzeContent() {
                         <button
                           type="button"
                           onClick={(event) => {
+                            event.preventDefault();
                             event.stopPropagation();
                             handleOpenVideoDetail(session.video_id!);
                           }}
