@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from sqlalchemy import text
 from app.core.config import settings
 from app.core.database import Base, engine
@@ -16,6 +17,11 @@ app = FastAPI(
     title="Engarde AI API",
     description="API for Engarde AI - Fencing Intelligence Platform",
     version="1.0.0"
+)
+
+app.add_middleware(
+    GZipMiddleware,
+    minimum_size=1024,
 )
 
 app.add_middleware(

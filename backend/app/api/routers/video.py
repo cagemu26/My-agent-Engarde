@@ -6,10 +6,12 @@ from pathlib import Path
 from typing import Any, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, status, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, status, BackgroundTasks, Request, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from app.schemas import (
     AthleteSlot,
@@ -269,6 +271,16 @@ def _build_signed_url(bucket: str, key: str) -> str:
         bucket=bucket,
         key=key,
     )
+
+
+def _sample_pose_sequence_evenly(frames: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    if limit <= 0 or len(frames) <= limit:
+        return frames
+    if limit == 1:
+        return [frames[len(frames) // 2]]
+
+    step = (len(frames) - 1) / (limit - 1)
+    return [frames[round(index * step)] for index in range(limit)]
 
 
 def _upload_path_to_storage(
@@ -1406,11 +1418,22 @@ async def get_pose_analysis_job_status(
 @router.get("/{video_id}/analysis-report", response_model=AnalysisReportResponse)
 async def get_analysis_report(
     video_id: str,
+    request: Request,
     athlete_slot: Optional[AthleteSlot] = Query(default=None),
     current_user: User = Depends(get_current_user_required),
     db: Session = Depends(get_db),
 ):
     metadata = ensure_video_access(video_id, current_user, db=db)
+    requested_slot = athlete_slot.value if athlete_slot else "auto"
+    report_etag = f'W/"report:{video_id}:{requested_slot}:{metadata.get("updated_at") or ""}"'
+    report_headers = {
+        "Cache-Control": "private, max-age=120",
+        "ETag": report_etag,
+        "Vary": "Authorization",
+    }
+    if request.headers.get("if-none-match") == report_etag:
+        return Response(status_code=304, headers=report_headers)
+
     pose_data = pose_analysis_service.get_pose_data(video_id, db=db)
     if not pose_data:
         raise HTTPException(
@@ -1430,9 +1453,10 @@ async def get_analysis_report(
     if not report:
         raise HTTPException(status_code=404, detail="Analysis report not found")
 
-    return AnalysisReportResponse(
+    payload = AnalysisReportResponse(
         **analysis_report_service.serialize_report(report, athlete_slot=resolved_slot)
     )
+    return JSONResponse(content=jsonable_encoder(payload), headers=report_headers)
 
 
 @router.post("/{video_id}/analyze/pose/report", response_model=AnalysisReportGenerateResponse)
@@ -1565,6 +1589,42 @@ async def create_pose_report_job(
         status=job.status,
         created_at=job.created_at,
     )
+
+
+@router.get(
+    "/{video_id}/analyze/pose/report/jobs/latest",
+    response_model=AnalysisReportJobStatusResponse,
+)
+async def get_latest_pose_report_job(
+    video_id: str,
+    athlete_slot: Optional[AthleteSlot] = Query(default=None),
+    current_user: User = Depends(get_current_user_required),
+    db: Session = Depends(get_db),
+):
+    ensure_video_access(video_id, current_user, db=db)
+
+    query = db.query(AnalysisReportJob).filter(AnalysisReportJob.video_id == video_id)
+    if athlete_slot is not None:
+        query = query.filter(
+            or_(
+                AnalysisReportJob.requested_slot == athlete_slot.value,
+                AnalysisReportJob.requested_slot.is_(None),
+            )
+        )
+    if not current_user.is_admin:
+        query = query.filter(AnalysisReportJob.user_id == current_user.id)
+
+    running_job = (
+        query.filter(AnalysisReportJob.status.in_([REPORT_JOB_STATUS_PENDING, REPORT_JOB_STATUS_RUNNING]))
+        .order_by(AnalysisReportJob.created_at.desc())
+        .first()
+    )
+    job = running_job or query.order_by(AnalysisReportJob.created_at.desc()).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Report job not found")
+
+    results = _decode_job_results(job)
+    return _serialize_report_job(job, results)
 
 
 @router.get(
@@ -1709,6 +1769,8 @@ async def get_pose_overlay_file(
 @router.get("/{video_id}/pose-data")
 async def get_pose_data(
     video_id: str,
+    request: Request,
+    max_frames: Optional[int] = Query(default=None, ge=1, le=2000),
     current_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ):
@@ -1717,7 +1779,15 @@ async def get_pose_data(
 
     Returns the detected pose landmarks for each processed frame.
     """
-    ensure_video_access(video_id, current_user, db=db)
+    metadata = ensure_video_access(video_id, current_user, db=db)
+    pose_etag = f'W/"pose:{video_id}:{max_frames or "full"}:{metadata.get("updated_at") or ""}"'
+    pose_headers = {
+        "Cache-Control": "private, max-age=300",
+        "ETag": pose_etag,
+        "Vary": "Authorization",
+    }
+    if request.headers.get("if-none-match") == pose_etag:
+        return Response(status_code=304, headers=pose_headers)
 
     pose_data = pose_analysis_service.get_pose_data(video_id, db=db)
     if not pose_data:
@@ -1726,4 +1796,14 @@ async def get_pose_data(
             detail="Pose data not found. Please run pose analysis first."
         )
 
-    return pose_data
+    payload: dict[str, Any] = pose_data
+    sequence = pose_data.get("pose_sequence")
+    if isinstance(sequence, list) and max_frames and len(sequence) > max_frames:
+        sampled_sequence = _sample_pose_sequence_evenly(sequence, max_frames)
+        payload = {**pose_data, "pose_sequence": sampled_sequence}
+        processing = dict(payload.get("processing") or {})
+        processing["sampled_frames"] = len(sampled_sequence)
+        processing["original_frames"] = len(sequence)
+        payload["processing"] = processing
+
+    return JSONResponse(content=jsonable_encoder(payload), headers=pose_headers)

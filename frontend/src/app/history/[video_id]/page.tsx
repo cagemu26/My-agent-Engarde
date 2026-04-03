@@ -7,6 +7,7 @@ import {
   ensureAnalysisReport,
   parseAnalysisReportCacheKey,
   readCachedAnalysisReport,
+  resumeLatestAnalysisReportJob,
   startAnalysisReportJob,
   waitForAnalysisReportJob,
 } from "@/lib/analysis-report";
@@ -45,6 +46,7 @@ interface VideoMetadata {
   score: string;
   tournament: string;
   upload_time: string;
+  report_status?: string;
 }
 
 interface AnalysisReport {
@@ -540,13 +542,27 @@ export default function VideoDetail() {
       setReportError(null);
       setReport(readCachedAnalysisReport<AnalysisReport>(videoId));
 
-      // Fetch video metadata
-      const videoResponse = await authFetch(`/video/${videoId}`, {
-        signal: abortController.signal,
-      });
+      // Fetch core metadata + pose payload in parallel to reduce first-paint latency.
+      const [videoResult, poseResult] = await Promise.allSettled([
+        authFetch(`/video/${videoId}`, {
+          signal: abortController.signal,
+        }),
+        authFetch(`/video/${videoId}/pose-data`, {
+          signal: abortController.signal,
+        }),
+      ]);
       if (!isCurrentRequest()) {
         return;
       }
+
+      if (videoResult.status === "rejected") {
+        if (isAbortError(videoResult.reason)) {
+          return;
+        }
+        throw new Error("Failed to fetch video");
+      }
+
+      const videoResponse = videoResult.value;
       if (!videoResponse.ok) {
         throw new Error("Failed to fetch video");
       }
@@ -556,15 +572,9 @@ export default function VideoDetail() {
       }
       setVideo(videoData);
 
-      // Fetch pose data (if available)
       let nextPoseData: PoseData | null = null;
-      try {
-        const poseResponse = await authFetch(`/video/${videoId}/pose-data`, {
-          signal: abortController.signal,
-        });
-        if (!isCurrentRequest()) {
-          return;
-        }
+      if (poseResult.status === "fulfilled") {
+        const poseResponse = poseResult.value;
         if (poseResponse.ok) {
           nextPoseData = (await poseResponse.json()) as PoseData;
           if (!isCurrentRequest()) {
@@ -575,10 +585,9 @@ export default function VideoDetail() {
         } else {
           setPoseData(null);
         }
-      } catch (error) {
-        if (isAbortError(error)) {
-          return;
-        }
+      } else if (isAbortError(poseResult.reason)) {
+        return;
+      } else {
         setPoseData(null);
       }
 
@@ -604,6 +613,23 @@ export default function VideoDetail() {
             return;
           }
           setReport(reportData);
+
+          const hasActiveReportJob =
+            (String(videoData.report_status || "").toLowerCase() === "pending") ||
+            (String(videoData.report_status || "").toLowerCase() === "running");
+          if (hasActiveReportJob || !reportData) {
+            setReportAction(hasActiveReportJob ? "generate" : "load");
+            const resumedReport = await resumeLatestAnalysisReportJob<AnalysisReport>(videoId, {
+              athleteSlot: defaultSlot,
+              pollIntervalMs: 1500,
+              timeoutMs: 240000,
+              signal: abortController.signal,
+            });
+            if (!isCurrentRequest()) {
+              return;
+            }
+            setReport(resumedReport ?? reportData ?? null);
+          }
         } else {
           setReport(null);
         }
@@ -693,13 +719,26 @@ export default function VideoDetail() {
       setSelectedAthleteSlot(fallbackSlot);
       return;
     }
+    const hasActiveReportJob =
+      (String(video?.report_status || "").toLowerCase() === "pending") ||
+      (String(video?.report_status || "").toLowerCase() === "running");
+
+    if (
+      report &&
+      report.video_id === videoId &&
+      (report.athlete_slot ?? fallbackSlot) === selectedAthleteSlot &&
+      !hasActiveReportJob
+    ) {
+      return;
+    }
 
     let cancelled = false;
+    const abortController = new AbortController();
 
     const syncSlotReport = async () => {
       const cachedReport = readCachedAnalysisReport<AnalysisReport>(videoId, selectedAthleteSlot);
       const cachedSlot = cachedReport ? (cachedReport.athlete_slot ?? fallbackSlot) : null;
-      if (cachedReport && cachedSlot === selectedAthleteSlot) {
+      if (cachedReport && cachedSlot === selectedAthleteSlot && !hasActiveReportJob) {
         setReport(cachedReport);
         setReportLoading(false);
         setReportAction(null);
@@ -709,15 +748,24 @@ export default function VideoDetail() {
 
       setReport(cachedReport);
       setReportLoading(true);
-      setReportAction("load");
+      setReportAction(hasActiveReportJob ? "generate" : "load");
       setReportError(null);
       try {
         const nextReport = await ensureAnalysisReport<AnalysisReport>(videoId, {
           athleteSlot: selectedAthleteSlot,
           generateIfMissing: false,
         });
+        const resumedReport =
+          hasActiveReportJob || !nextReport
+            ? await resumeLatestAnalysisReportJob<AnalysisReport>(videoId, {
+                athleteSlot: selectedAthleteSlot,
+                pollIntervalMs: 1500,
+                timeoutMs: 240000,
+                signal: abortController.signal,
+              })
+            : null;
         if (!cancelled) {
-          setReport(nextReport ?? cachedReport ?? null);
+          setReport(resumedReport ?? nextReport ?? cachedReport ?? null);
         }
       } catch (err) {
         if (!cancelled) {
@@ -736,8 +784,9 @@ export default function VideoDetail() {
 
     return () => {
       cancelled = true;
+      abortController.abort();
     };
-  }, [availableAthleteSlots, poseData, selectedAthleteSlot, videoId]);
+  }, [availableAthleteSlots, poseData, report, selectedAthleteSlot, video, videoId]);
 
   useEffect(() => {
     const initialView = searchParams.get("view");
@@ -1229,7 +1278,7 @@ export default function VideoDetail() {
                     key={replayMode}
                     controls
                     playsInline
-                    preload="metadata"
+                    preload="none"
                     className="h-full w-full"
                     src={replayMode === "skeleton" ? skeletonReplayUrl : originalReplayUrl}
                     onLoadedMetadata={(event) => syncPoseFrameWithPlayback(event.currentTarget.currentTime || 0)}

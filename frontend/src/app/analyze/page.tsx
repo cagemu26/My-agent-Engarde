@@ -9,6 +9,7 @@ import {
   ensureAnalysisReport,
   parseAnalysisReportCacheKey,
   readCachedAnalysisReport,
+  resumeLatestAnalysisReportJob,
   startAnalysisReportJob,
   waitForAnalysisReportJob,
 } from "@/lib/analysis-report";
@@ -77,6 +78,7 @@ interface HistoryItem {
   tournament: string;
   upload_time: string;
   upload_status?: string;
+  report_status?: string;
 }
 
 interface AnalysisReportRecord {
@@ -211,6 +213,7 @@ const MAX_BACKEND_SESSION_MESSAGES = 80;
 const MAX_CONTEXT_CHARS = 180000;
 const TARGET_CONTEXT_FRAMES = 480;
 const MIN_CONTEXT_FRAMES = 96;
+const CONTEXT_POSE_MAX_FRAMES = 560;
 const MAX_REPORT_EXCERPT_CHARS = 2400;
 
 const DEFAULT_CHAT_OPENING =
@@ -426,7 +429,6 @@ function AnalyzeContent() {
   });
 
   const [historyVideos, setHistoryVideos] = useState<HistoryItem[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(true);
   const [chatSessions, setChatSessions] = useState<ChatSessionRecord[]>([]);
   const [chatSessionsLoading, setChatSessionsLoading] = useState(true);
   const [chatSessionsError, setChatSessionsError] = useState<string | null>(null);
@@ -1243,7 +1245,6 @@ function AnalyzeContent() {
 
   const fetchHistoryVideos = useCallback(async () => {
     try {
-      setHistoryLoading(true);
       const response = await authFetch("/video/list");
       if (!response.ok) {
         throw new Error("Failed to fetch videos");
@@ -1258,8 +1259,6 @@ function AnalyzeContent() {
       );
     } catch {
       // Keep previous video list on transient failures.
-    } finally {
-      setHistoryLoading(false);
     }
   }, []);
 
@@ -1291,7 +1290,10 @@ function AnalyzeContent() {
       let report: AnalysisReportRecord | null = null;
 
       try {
-        const poseResponse = await authFetch(`/video/${videoId}/pose-data`, { signal });
+        const poseResponse = await authFetch(
+          `/video/${videoId}/pose-data?max_frames=${CONTEXT_POSE_MAX_FRAMES}`,
+          { signal },
+        );
         throwIfAborted();
         if (poseResponse.ok) {
           pose = (await poseResponse.json()) as PoseData;
@@ -1393,20 +1395,28 @@ function AnalyzeContent() {
     if (
       historyReport &&
       historyReport.video_id === selectedHistoryVideoId &&
-      (historyReport.athlete_slot ?? fallbackSlot) === selectedHistoryAthleteSlot
+      (historyReport.athlete_slot ?? fallbackSlot) === selectedHistoryAthleteSlot &&
+      !(
+        String(historyDetail?.report_status || "").toLowerCase() === "pending" ||
+        String(historyDetail?.report_status || "").toLowerCase() === "running"
+      )
     ) {
       return;
     }
 
     let cancelled = false;
+    const abortController = new AbortController();
 
     const syncSlotReport = async () => {
+      const hasActiveReportJob =
+        String(historyDetail?.report_status || "").toLowerCase() === "pending" ||
+        String(historyDetail?.report_status || "").toLowerCase() === "running";
       const cachedReport = readCachedAnalysisReport<AnalysisReportRecord>(
         selectedHistoryVideoId,
         selectedHistoryAthleteSlot,
       );
       const cachedSlot = cachedReport ? (cachedReport.athlete_slot ?? fallbackSlot) : null;
-      if (cachedReport && cachedSlot === selectedHistoryAthleteSlot) {
+      if (cachedReport && cachedSlot === selectedHistoryAthleteSlot && !hasActiveReportJob) {
         setHistoryReport(cachedReport);
         setHistoryReportLoading(false);
         setHistoryReportAction(null);
@@ -1416,15 +1426,24 @@ function AnalyzeContent() {
 
       setHistoryReport(cachedReport);
       setHistoryReportLoading(true);
-      setHistoryReportAction("load");
+      setHistoryReportAction(hasActiveReportJob ? "generate" : "load");
       setHistoryReportError(null);
       try {
         const report = await ensureAnalysisReport<AnalysisReportRecord>(selectedHistoryVideoId, {
           athleteSlot: selectedHistoryAthleteSlot,
           generateIfMissing: false,
         });
+        const resumedReport =
+          hasActiveReportJob || !report
+            ? await resumeLatestAnalysisReportJob<AnalysisReportRecord>(selectedHistoryVideoId, {
+                athleteSlot: selectedHistoryAthleteSlot,
+                pollIntervalMs: 1500,
+                timeoutMs: 240000,
+                signal: abortController.signal,
+              })
+            : null;
         if (!cancelled) {
-          setHistoryReport(report ?? cachedReport ?? null);
+          setHistoryReport(resumedReport ?? report ?? cachedReport ?? null);
         }
       } catch (err) {
         if (!cancelled) {
@@ -1443,8 +1462,10 @@ function AnalyzeContent() {
 
     return () => {
       cancelled = true;
+      abortController.abort();
     };
   }, [
+    historyDetail,
     historyAthleteSlots,
     historyPoseData,
     historyReport,
@@ -1754,23 +1775,27 @@ function AnalyzeContent() {
   }, [fetchChatSessions, hasHandledTrainingHandoff, resolveBackendChatSession, searchParams, syncAnalyzeSessionUrl]);
 
   useEffect(() => {
-    if (historyLoading || hasHandledSearchParamVideo) return;
-
     const videoId = searchParams.get("video");
-    if (videoId) {
-      contextTransitionRef.current += 1;
-      suppressUrlSessionRestoreRef.current = true;
-      hasInitializedDefaultSessionRef.current = true;
-      setSelectedHistoryVideoId(videoId);
-      setActiveTab("history");
-      void (async () => {
-        const preloaded = await loadHistoryDetail(videoId);
-        await activateVideoChatSession(videoId, { preloaded });
-      })();
+
+    if (!videoId) {
+      if (hasHandledSearchParamVideo) {
+        setHasHandledSearchParamVideo(false);
+      }
+      return;
     }
 
+    if (hasHandledSearchParamVideo) return;
+
+    contextTransitionRef.current += 1;
+    suppressUrlSessionRestoreRef.current = true;
+    hasInitializedDefaultSessionRef.current = true;
+    setSelectedHistoryVideoId(videoId);
+    setActiveTab("history");
+    void (async () => {
+      await loadHistoryDetail(videoId);
+    })();
     setHasHandledSearchParamVideo(true);
-  }, [historyLoading, hasHandledSearchParamVideo, searchParams, loadHistoryDetail, activateVideoChatSession]);
+  }, [hasHandledSearchParamVideo, searchParams, loadHistoryDetail]);
 
   useEffect(() => {
     if (!hasHandledTrainingHandoff) return;
@@ -1872,11 +1897,10 @@ function AnalyzeContent() {
       setActiveTab("history");
       setIsMobileSidebarOpen(false);
       void (async () => {
-        const preloaded = await loadHistoryDetail(videoId);
-        await activateVideoChatSession(videoId, { preloaded });
+        await loadHistoryDetail(videoId);
       })();
     },
-    [activateVideoChatSession, cancelActiveChatStream, cancelHistoryDetailRequest, loadHistoryDetail],
+    [cancelActiveChatStream, cancelHistoryDetailRequest, loadHistoryDetail],
   );
 
   const handleEnterVideoAnalysis = useCallback(() => {

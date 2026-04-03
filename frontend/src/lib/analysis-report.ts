@@ -22,6 +22,7 @@ interface EnsureAnalysisReportAsyncOptions {
   chatSessionId?: string | null;
   timeoutMs?: number;
   pollIntervalMs?: number;
+  signal?: AbortSignal;
 }
 
 export interface AnalysisReportJobCreateResponse {
@@ -255,7 +256,7 @@ export async function startAnalysisReportJob(
   const suffix = query.toString();
   const response = await authFetch(
     `/video/${videoId}/analyze/pose/report/jobs${suffix ? `?${suffix}` : ""}`,
-    { method: "POST" },
+    { method: "POST", signal: options.signal },
   );
   if (!response.ok) {
     throw new Error("Failed to start analysis report job");
@@ -266,15 +267,76 @@ export async function startAnalysisReportJob(
 export async function getAnalysisReportJobStatus<T extends CachedAnalysisReport = CachedAnalysisReport>(
   videoId: string,
   jobId: string,
+  options: Pick<EnsureAnalysisReportAsyncOptions, "signal"> = {},
 ): Promise<AnalysisReportJobStatusResponse<T>> {
-  const response = await authFetch(`/video/${videoId}/analyze/pose/report/jobs/${encodeURIComponent(jobId)}`);
+  const response = await authFetch(
+    `/video/${videoId}/analyze/pose/report/jobs/${encodeURIComponent(jobId)}`,
+    { signal: options.signal },
+  );
   if (!response.ok) {
     throw new Error("Failed to fetch analysis report job status");
   }
   return (await response.json()) as AnalysisReportJobStatusResponse<T>;
 }
 
-const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+export async function getLatestAnalysisReportJob<T extends CachedAnalysisReport = CachedAnalysisReport>(
+  videoId: string,
+  options: Pick<EnsureAnalysisReportAsyncOptions, "athleteSlot" | "signal"> = {},
+): Promise<AnalysisReportJobStatusResponse<T> | null> {
+  const query = new URLSearchParams();
+  if (options.athleteSlot) {
+    query.set("athlete_slot", options.athleteSlot);
+  }
+
+  const response = await authFetch(
+    `/video/${videoId}/analyze/pose/report/jobs/latest${query.toString() ? `?${query.toString()}` : ""}`,
+    { signal: options.signal },
+  );
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error("Failed to fetch latest analysis report job");
+  }
+  return (await response.json()) as AnalysisReportJobStatusResponse<T>;
+}
+
+function resolveReportForSlot<T extends CachedAnalysisReport>(
+  results: Array<T & { cached?: boolean }>,
+  athleteSlot?: AthleteSlot | null,
+): (T & { cached?: boolean }) | null {
+  if (!results.length) {
+    return null;
+  }
+  if (!athleteSlot) {
+    return results[0] ?? null;
+  }
+  return results.find((item) => (item.athlete_slot ?? athleteSlot) === athleteSlot) ?? results[0] ?? null;
+}
+
+const delay = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    const timerId = window.setTimeout(() => {
+      if (signal) {
+        signal.removeEventListener("abort", handleAbort);
+      }
+      resolve();
+    }, ms);
+
+    const handleAbort = () => {
+      window.clearTimeout(timerId);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+
+    if (!signal) {
+      return;
+    }
+    if (signal.aborted) {
+      handleAbort();
+      return;
+    }
+    signal.addEventListener("abort", handleAbort, { once: true });
+  });
 
 export async function waitForAnalysisReportJob<T extends CachedAnalysisReport = CachedAnalysisReport>(
   videoId: string,
@@ -286,7 +348,7 @@ export async function waitForAnalysisReportJob<T extends CachedAnalysisReport = 
   const start = Date.now();
 
   while (true) {
-    const status = await getAnalysisReportJobStatus<T>(videoId, jobId);
+    const status = await getAnalysisReportJobStatus<T>(videoId, jobId, { signal: options.signal });
     if (status.status === "completed") {
       for (const report of status.results || []) {
         writeCachedAnalysisReport(report);
@@ -299,6 +361,30 @@ export async function waitForAnalysisReportJob<T extends CachedAnalysisReport = 
     if (Date.now() - start >= timeoutMs) {
       throw new Error("Analysis report job timed out");
     }
-    await delay(pollIntervalMs);
+    await delay(pollIntervalMs, options.signal);
   }
+}
+
+export async function resumeLatestAnalysisReportJob<T extends CachedAnalysisReport = CachedAnalysisReport>(
+  videoId: string,
+  options: EnsureAnalysisReportAsyncOptions = {},
+): Promise<(T & { cached?: boolean }) | null> {
+  const latestJob = await getLatestAnalysisReportJob<T>(videoId, {
+    athleteSlot: options.athleteSlot,
+    signal: options.signal,
+  });
+  if (!latestJob) {
+    return null;
+  }
+
+  if (latestJob.status === "failed") {
+    throw new Error(latestJob.error || "Analysis report job failed");
+  }
+
+  const finalStatus =
+    latestJob.status === "completed"
+      ? latestJob
+      : await waitForAnalysisReportJob<T>(videoId, latestJob.job_id, options);
+
+  return resolveReportForSlot(finalStatus.results || [], options.athleteSlot);
 }
