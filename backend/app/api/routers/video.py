@@ -465,6 +465,46 @@ def _decode_pose_job_result(job: PoseAnalysisJob) -> Optional[PoseAnalyzeRespons
         return None
 
 
+def _find_active_pose_job(db: Session, video_id: str) -> Optional[PoseAnalysisJob]:
+    return (
+        db.query(PoseAnalysisJob)
+        .filter(
+            PoseAnalysisJob.video_id == video_id,
+            PoseAnalysisJob.status.in_([POSE_JOB_STATUS_PENDING, POSE_JOB_STATUS_RUNNING]),
+        )
+        .order_by(PoseAnalysisJob.created_at.desc())
+        .first()
+    )
+
+
+def _enqueue_pose_job_if_needed(
+    *,
+    db: Session,
+    background_tasks: BackgroundTasks,
+    video_id: str,
+    owner_id: str,
+) -> PoseAnalysisJob:
+    active_job = _find_active_pose_job(db, video_id)
+    if active_job:
+        return active_job
+
+    owner_uuid = analysis_report_service._parse_user_id(owner_id)
+    job = PoseAnalysisJob(
+        user_id=owner_uuid,
+        video_id=video_id,
+        status=POSE_JOB_STATUS_PENDING,
+    )
+    db.add(job)
+    video_record = _get_video_record(db, video_id)
+    if video_record:
+        video_record.pose_status = POSE_JOB_STATUS_PENDING
+    db.commit()
+    db.refresh(job)
+    background_tasks.add_task(_run_pose_job, str(job.id))
+    logger.info("pose_job_enqueued job_id=%s video_id=%s source=overlay", str(job.id), video_id)
+    return job
+
+
 def _run_pose_job(job_id: str) -> None:
     db = SessionLocal()
     try:
@@ -1425,6 +1465,7 @@ async def get_pose_report_job_status(
 @router.get("/{video_id}/pose-overlay", response_model=PoseOverlayResponse)
 async def get_pose_overlay(
     video_id: str,
+    background_tasks: BackgroundTasks,
     current_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ):
@@ -1435,7 +1476,7 @@ async def get_pose_overlay(
     """
     metadata = ensure_video_access(video_id, current_user, db=db)
     _ensure_video_uploaded(metadata)
-    video_record = _get_video_record(db, video_id)
+
     if storage_service.provider_name == "cos" and metadata.get("overlay_bucket") and metadata.get("overlay_key"):
         overlay_bucket = str(metadata["overlay_bucket"])
         overlay_key = str(metadata["overlay_key"])
@@ -1449,51 +1490,34 @@ async def get_pose_overlay(
                 overlay_video_path=signed_url,
                 message="Pose overlay video (cached)"
             )
-
-    try:
-        if video_record and video_record.source_bucket and video_record.source_key:
-            _run_pose_pipeline_for_record(
-                db=db,
-                video_record=video_record,
-                work_id=f"overlay-{video_id}",
-            )
-            if storage_service.provider_name == "cos":
-                if not video_record.overlay_key:
-                    raise HTTPException(status_code=500, detail="Overlay generation succeeded but overlay key is missing")
-                signed_url = _build_signed_url(
-                    bucket=video_record.overlay_bucket or video_record.source_bucket,
-                    key=video_record.overlay_key,
-                )
-                overlay_path = signed_url
-            else:
-                overlay_path = pose_analysis_service.get_overlay_path(video_id) or ""
-        else:
-            video_path = video_service.get_video_path(video_id)
-            if not video_path:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Video not found. Please upload the video first."
-                )
-            overlay_path = pose_analysis_service.generate_pose_overlay(
-                video_path=video_path,
-                video_id=video_id
-            )
-
+    local_overlay_path = pose_analysis_service.get_overlay_path(video_id)
+    if local_overlay_path and Path(local_overlay_path).exists():
         return PoseOverlayResponse(
             video_id=video_id,
-            overlay_video_path=overlay_path,
-            message="Pose overlay video generated successfully"
+            overlay_video_path=local_overlay_path,
+            message="Pose overlay video (cached)"
         )
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to generate pose overlay: {str(e)}"
-        )
+
+    owner_id = str(metadata.get("user_id") or (current_user.id if current_user else ""))
+    if not owner_id:
+        raise HTTPException(status_code=500, detail="Video owner is missing")
+
+    _enqueue_pose_job_if_needed(
+        db=db,
+        background_tasks=background_tasks,
+        video_id=video_id,
+        owner_id=owner_id,
+    )
+    raise HTTPException(
+        status_code=409,
+        detail="Pose overlay is being generated in background. Please retry in a few seconds.",
+    )
 
 
 @router.get("/{video_id}/pose-overlay/file")
 async def get_pose_overlay_file(
     video_id: str,
+    background_tasks: BackgroundTasks,
     current_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ):
@@ -1502,6 +1526,7 @@ async def get_pose_overlay_file(
     """
     metadata = ensure_video_access(video_id, current_user, db=db)
     _ensure_video_uploaded(metadata)
+
     if storage_service.provider_name == "cos" and metadata.get("overlay_bucket") and metadata.get("overlay_key"):
         overlay_bucket = str(metadata["overlay_bucket"])
         overlay_key = str(metadata["overlay_key"])
@@ -1512,50 +1537,28 @@ async def get_pose_overlay_file(
             )
             return RedirectResponse(url=signed_url, status_code=302)
 
-    video_record = _get_video_record(db, video_id)
-    if video_record and video_record.source_bucket and video_record.source_key:
-        _run_pose_pipeline_for_record(
-            db=db,
-            video_record=video_record,
-            work_id=f"overlay-file-{video_id}",
-        )
-        if (
-            storage_service.provider_name == "cos"
-            and video_record.overlay_bucket
-            and video_record.overlay_key
-            and _object_exists(bucket=video_record.overlay_bucket, key=video_record.overlay_key)
-        ):
-            signed_url = _build_signed_url(
-                bucket=video_record.overlay_bucket,
-                key=video_record.overlay_key,
-            )
-            return RedirectResponse(url=signed_url, status_code=302)
-
-    video_path = video_service.get_video_path(video_id)
-    if not video_path:
-        raise HTTPException(
-            status_code=404,
-            detail="Video not found. Please upload the video first."
-        )
-
     overlay_path = pose_analysis_service.get_overlay_path(video_id)
-    if not overlay_path:
-        try:
-            overlay_path = pose_analysis_service.generate_pose_overlay(
-                video_path=video_path,
-                video_id=video_id,
-            )
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to generate pose overlay: {str(e)}"
-            )
+    if overlay_path and Path(overlay_path).exists():
+        media_type, _ = mimetypes.guess_type(overlay_path)
+        return FileResponse(
+            overlay_path,
+            media_type=media_type or "video/mp4",
+            headers={"Accept-Ranges": "bytes"},
+        )
 
-    media_type, _ = mimetypes.guess_type(overlay_path)
-    return FileResponse(
-        overlay_path,
-        media_type=media_type or "video/mp4",
-        headers={"Accept-Ranges": "bytes"},
+    owner_id = str(metadata.get("user_id") or (current_user.id if current_user else ""))
+    if not owner_id:
+        raise HTTPException(status_code=500, detail="Video owner is missing")
+
+    _enqueue_pose_job_if_needed(
+        db=db,
+        background_tasks=background_tasks,
+        video_id=video_id,
+        owner_id=owner_id,
+    )
+    raise HTTPException(
+        status_code=409,
+        detail="Pose overlay file is still being generated. Please retry shortly.",
     )
 
 

@@ -779,7 +779,16 @@ export default function VideoDetail() {
         return;
       }
       if (!response.ok) {
-        throw new Error("Failed to prepare skeleton replay");
+        let message = "Failed to prepare skeleton replay";
+        try {
+          const payload = await response.json();
+          if (payload && typeof payload.detail === "string" && payload.detail.trim().length > 0) {
+            message = payload.detail;
+          }
+        } catch {
+          // keep default message
+        }
+        throw new Error(message);
       }
       await response.json();
       if (abortController.signal.aborted) {

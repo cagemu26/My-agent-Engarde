@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -629,14 +630,21 @@ class PoseAnalysisService:
         if not cap.isOpened():
             raise ValueError(f"Cannot open video file: {video_path}")
 
-        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        fps_raw = float(cap.get(cv2.CAP_PROP_FPS))
+        fps = fps_raw if fps_raw > 0 else 30.0
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
         target_output_dir = Path(output_dir) if output_dir else None
         output_path = self._get_overlay_video_path(video_id, output_dir=target_output_dir)
+        raw_output_path = output_path.with_name(f"{output_path.stem}.raw.mp4")
+        if raw_output_path.exists():
+            raw_output_path.unlink()
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        out = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+        out = cv2.VideoWriter(str(raw_output_path), fourcc, fps, (width, height))
+        if not out.isOpened():
+            cap.release()
+            raise RuntimeError("Failed to initialize overlay video writer")
 
         frame_idx = 0
         while cap.isOpened():
@@ -654,6 +662,37 @@ class PoseAnalysisService:
 
         cap.release()
         out.release()
+
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(raw_output_path),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            "-an",
+            str(output_path),
+        ]
+        try:
+            result = subprocess.run(
+                ffmpeg_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or "ffmpeg conversion failed")
+            raw_output_path.unlink(missing_ok=True)
+        except Exception as exc:
+            if output_path.exists():
+                output_path.unlink(missing_ok=True)
+            raw_output_path.replace(output_path)
+            print(f"ffmpeg transcoding unavailable, fallback to mp4v overlay: {exc}")
 
         print(f"Pose overlay video saved to: {output_path}")
         return str(output_path)
