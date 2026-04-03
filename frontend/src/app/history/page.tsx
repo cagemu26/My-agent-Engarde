@@ -14,6 +14,7 @@ import {
   normalizeSessionType,
 } from "@/lib/chat-session";
 import { TopNav } from "@/components/top-nav";
+import { useAppDialog } from "@/components/app-dialog-provider";
 
 const HISTORY_NAV_LINKS = [
   { href: "/analyze", label: "Analyze" },
@@ -33,6 +34,7 @@ interface VideoMetadata {
   score: string;
   tournament: string;
   upload_time: string;
+  upload_status?: string;
 }
 
 interface ChatSessionRecord {
@@ -105,6 +107,7 @@ const parseApiError = async (response: Response, fallback: string): Promise<stri
 
 export default function History() {
   const router = useRouter();
+  const { confirm } = useAppDialog();
   const [videos, setVideos] = useState<VideoMetadata[]>([]);
   const [sessions, setSessions] = useState<ChatSessionRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -128,7 +131,13 @@ export default function History() {
 
       const videosData = await videosResponse.json();
       const sessionsData = await sessionsResponse.json();
-      setVideos(videosData.videos || []);
+      const videos = Array.isArray(videosData.videos) ? (videosData.videos as VideoMetadata[]) : [];
+      setVideos(
+        videos.filter((item) => {
+          const status = (item.upload_status || "").trim().toLowerCase();
+          return !status || status === "uploaded";
+        }),
+      );
       setSessions((sessionsData.sessions || []) as ChatSessionRecord[]);
       setError(null);
     } catch (err) {
@@ -201,11 +210,17 @@ export default function History() {
 
       const normalizedType = normalizeSessionType(session.session_type);
       const isVideoSession = normalizedType === SESSION_TYPE_VIDEO && Boolean(session.video_id);
-      const confirmMessage = isVideoSession
-        ? "Delete this video session?\n\nThis will permanently delete all related video-analysis sessions, messages, video assets, and reports for this video. This action cannot be undone."
-        : "Delete this session and all its messages? This action cannot be undone.";
 
-      if (!window.confirm(confirmMessage)) {
+      const confirmed = await confirm({
+        title: isVideoSession ? "Delete this video session?" : "Delete this session?",
+        description: isVideoSession
+          ? "This will permanently delete all related video-analysis sessions, messages, video assets, and reports for this video. This action cannot be undone."
+          : "This will permanently delete this session and all messages. This action cannot be undone.",
+        confirmText: "Delete",
+        cancelText: "Cancel",
+        danger: true,
+      });
+      if (!confirmed) {
         return;
       }
 
@@ -247,7 +262,7 @@ export default function History() {
         setDeletingSessionId(null);
       }
     },
-    [deletingSessionId],
+    [confirm, deletingSessionId],
   );
 
   return (

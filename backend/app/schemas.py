@@ -292,8 +292,10 @@ class PoseAnalysisJobStatusResponse(BaseModel):
 class PoseOverlayResponse(BaseModel):
     """Response with path to pose overlay video"""
     video_id: str
-    overlay_video_path: str
+    overlay_video_path: Optional[str] = None
     message: str
+    status: Optional[str] = None
+    job_id: Optional[str] = None
 
 
 class AnalysisReportResponse(BaseModel):

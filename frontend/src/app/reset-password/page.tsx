@@ -4,6 +4,7 @@ import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { buildApiUrl } from "@/lib/api";
+import { BrandLogo } from "@/components/brand-logo";
 
 function AuthShell({ children }: { children: React.ReactNode }) {
   return (
@@ -24,14 +25,8 @@ function AuthShell({ children }: { children: React.ReactNode }) {
 function BrandHeader() {
   return (
     <div className="text-center mb-8">
-      <Link href="/" className="inline-flex items-center gap-3 group">
-        <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-red-600 to-red-700 flex items-center justify-center shadow-lg shadow-red-500/30 group-hover:scale-105 transition-transform duration-300">
-          <span className="text-white font-bold text-xl">E</span>
-        </div>
-        <div>
-          <span className="font-bold text-2xl tracking-tight">Engarde</span>
-          <span className="font-bold text-2xl text-red-600">AI</span>
-        </div>
+      <Link href="/" className="inline-flex items-center">
+        <BrandLogo variant="lockup" tone="dark" size="sm" />
       </Link>
     </div>
   );

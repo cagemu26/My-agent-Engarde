@@ -1,8 +1,9 @@
 "use client";
 
-import { createContext, useCallback, useContext, useState, useEffect, ReactNode } from "react";
+import { createContext, useCallback, useContext, useState, useEffect, ReactNode, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { AUTH_EXPIRED_EVENT, buildApiUrl } from "@/lib/api";
+import { useAppDialog } from "@/components/app-dialog-provider";
 
 export interface AuthUser {
   id: string;
@@ -30,9 +31,11 @@ const AUTH_FREE_PATH_PREFIXES = ["/login", "/register", "/verify-email", "/reset
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const router = useRouter();
+  const { alert } = useAppDialog();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const handlingAuthExpiredRef = useRef(false);
 
   const clearAuthState = useCallback(() => {
     setToken(null);
@@ -58,24 +61,43 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [clearAuthState]);
 
   useEffect(() => {
-    const handleAuthExpired = () => {
-      clearAuthState();
-      const pathname = window.location.pathname;
-      const onAuthFreePage = AUTH_FREE_PATH_PREFIXES.some((prefix) => pathname.startsWith(prefix));
-      if (onAuthFreePage) {
-        return;
-      }
+    const handleAuthExpired = (event: Event) => {
+      if (handlingAuthExpiredRef.current) return;
+      handlingAuthExpiredRef.current = true;
 
-      const nextPath = `${pathname}${window.location.search || ""}`;
-      const loginPath = nextPath ? `/login?next=${encodeURIComponent(nextPath)}` : "/login";
-      router.replace(loginPath);
+      void (async () => {
+        try {
+          clearAuthState();
+          const pathname = window.location.pathname;
+          const onAuthFreePage = AUTH_FREE_PATH_PREFIXES.some((prefix) => pathname.startsWith(prefix));
+          if (onAuthFreePage) {
+            return;
+          }
+
+          const detail =
+            event instanceof CustomEvent && event.detail && typeof event.detail === "object"
+              ? (event.detail as { message?: string })
+              : null;
+          await alert({
+            title: "登录已失效",
+            description: detail?.message || "当前登录状态已过期，请重新登录后继续操作。",
+            confirmText: "去登录",
+          });
+
+          const nextPath = `${pathname}${window.location.search || ""}`;
+          const loginPath = nextPath ? `/login?next=${encodeURIComponent(nextPath)}` : "/login";
+          router.replace(loginPath);
+        } finally {
+          handlingAuthExpiredRef.current = false;
+        }
+      })();
     };
 
     window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
     return () => {
       window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
     };
-  }, [clearAuthState, router]);
+  }, [alert, clearAuthState, router]);
 
   const login = async (email: string, password: string) => {
     const response = await fetch(buildApiUrl("/api/auth/login"), {

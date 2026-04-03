@@ -39,12 +39,18 @@ class VideoService:
         path = f"users/{user_id}/videos/{video_id}/{self._raw_prefix()}/{filename}"
         return storage_service.normalize_key(path)
 
-    def build_pose_data_key(self, *, user_id: str, video_id: str) -> str:
-        path = f"users/{user_id}/videos/{video_id}/{self._derived_prefix()}/pose_data.json"
+    def build_pose_data_key(self, *, user_id: str, video_id: str, version: Optional[str] = None) -> str:
+        if version:
+            path = f"users/{user_id}/videos/{video_id}/{self._derived_prefix()}/{version}/pose_data.json"
+        else:
+            path = f"users/{user_id}/videos/{video_id}/{self._derived_prefix()}/pose_data.json"
         return storage_service.normalize_key(path)
 
-    def build_overlay_key(self, *, user_id: str, video_id: str) -> str:
-        path = f"users/{user_id}/videos/{video_id}/{self._derived_prefix()}/pose_overlay.mp4"
+    def build_overlay_key(self, *, user_id: str, video_id: str, version: Optional[str] = None) -> str:
+        if version:
+            path = f"users/{user_id}/videos/{video_id}/{self._derived_prefix()}/{version}/pose_overlay.mp4"
+        else:
+            path = f"users/{user_id}/videos/{video_id}/{self._derived_prefix()}/pose_overlay.mp4"
         return storage_service.normalize_key(path)
 
     def make_storage_uri(self, *, bucket: str, key: str) -> str:

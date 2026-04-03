@@ -21,6 +21,7 @@ class StorageProvider(ABC):
         key: str,
         data: bytes,
         content_type: Optional[str] = None,
+        cache_control: Optional[str] = None,
     ) -> None:
         raise NotImplementedError
 
@@ -32,6 +33,7 @@ class StorageProvider(ABC):
         key: str,
         file_path: str,
         content_type: Optional[str] = None,
+        cache_control: Optional[str] = None,
     ) -> None:
         raise NotImplementedError
 
@@ -90,8 +92,9 @@ class LocalStorageProvider(StorageProvider):
         key: str,
         data: bytes,
         content_type: Optional[str] = None,
+        cache_control: Optional[str] = None,
     ) -> None:
-        del content_type
+        del content_type, cache_control
         path = self._resolve_path(bucket, key)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "wb") as fh:
@@ -104,8 +107,9 @@ class LocalStorageProvider(StorageProvider):
         key: str,
         file_path: str,
         content_type: Optional[str] = None,
+        cache_control: Optional[str] = None,
     ) -> None:
-        del content_type
+        del content_type, cache_control
         src = Path(file_path)
         dst = self._resolve_path(bucket, key)
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -197,6 +201,7 @@ class CosStorageProvider(StorageProvider):
         key: str,
         data: bytes,
         content_type: Optional[str] = None,
+        cache_control: Optional[str] = None,
     ) -> None:
         kwargs = {
             "Bucket": bucket,
@@ -205,6 +210,8 @@ class CosStorageProvider(StorageProvider):
         }
         if content_type:
             kwargs["ContentType"] = content_type
+        if cache_control:
+            kwargs["CacheControl"] = cache_control
         self.client.put_object(**kwargs)
 
     def put_file(
@@ -214,6 +221,7 @@ class CosStorageProvider(StorageProvider):
         key: str,
         file_path: str,
         content_type: Optional[str] = None,
+        cache_control: Optional[str] = None,
     ) -> None:
         kwargs = {
             "Bucket": bucket,
@@ -222,6 +230,8 @@ class CosStorageProvider(StorageProvider):
         }
         if content_type:
             kwargs["ContentType"] = content_type
+        if cache_control:
+            kwargs["CacheControl"] = cache_control
         self.client.upload_file(**kwargs)
 
     def download_to_temp(

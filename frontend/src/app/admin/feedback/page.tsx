@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { buildApiUrl } from "@/lib/api";
 import { TopNav } from "@/components/top-nav";
+import { useAppDialog } from "@/components/app-dialog-provider";
 
 const ADMIN_NAV_LINKS = [
   { href: "/analyze", label: "Analyze" },
@@ -28,6 +29,7 @@ interface Feedback {
 
 export default function FeedbackAdminPage() {
   const { user, token, isLoading } = useAuth();
+  const { confirm } = useAppDialog();
   const router = useRouter();
   const [feedbacks, setFeedbacks] = useState<Feedback[]>([]);
   const [loading, setLoading] = useState(true);
@@ -130,7 +132,14 @@ export default function FeedbackAdminPage() {
   };
 
   const deleteFeedback = async (feedbackId: string) => {
-    if (!confirm("Are you sure you want to delete this feedback?")) return;
+    const confirmed = await confirm({
+      title: "Delete feedback?",
+      description: "This action cannot be undone.",
+      confirmText: "Delete",
+      cancelText: "Cancel",
+      danger: true,
+    });
+    if (!confirmed) return;
 
     try {
       const response = await fetch(buildApiUrl(`/api/feedback/${feedbackId}`), {

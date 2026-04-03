@@ -7,7 +7,7 @@ from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, status, BackgroundTasks
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -30,11 +30,19 @@ from app.schemas import (
 from app.services.video import video_service
 from app.services.pose_analysis import pose_analysis_service
 from app.services.analysis_report import analysis_report_service
+from app.services.asset_delivery import asset_delivery_service
 from app.services.storage import storage_service
 from app.core.config import settings
 from app.core.database import get_db, SessionLocal
 from app.core.auth import verify_token
-from app.models import User, AnalysisReportJob, PoseAnalysisJob, Video
+from app.models import (
+    User,
+    AnalysisReportJob,
+    PoseAnalysisJob,
+    Video,
+    ChatSession,
+    ChatMessage,
+)
 
 
 router = APIRouter(tags=["video"])
@@ -67,6 +75,9 @@ POSE_JOB_STATUS_FAILED = "failed"
 UPLOAD_STATUS_INITIATED = "initiated"
 UPLOAD_STATUS_UPLOADED = "uploaded"
 UPLOAD_STATUS_FAILED = "failed"
+CHAT_SESSION_TYPE_VIDEO = "video_analysis"
+ANALYSIS_COMPLETION_NOTICE = "分析已完成，可前往历史详情页面查看分析细节。"
+DERIVED_OBJECT_CACHE_CONTROL = "public, max-age=31536000, immutable"
 
 
 class UploadInitiateRequest(BaseModel):
@@ -254,19 +265,26 @@ def _object_exists(bucket: str, key: str) -> bool:
 
 
 def _build_signed_url(bucket: str, key: str) -> str:
-    return storage_service.provider.generate_presigned_get_url(
+    return asset_delivery_service.generate_media_get_url(
         bucket=bucket,
         key=key,
-        expires_seconds=storage_service.signed_url_expire_seconds,
     )
 
 
-def _upload_path_to_storage(*, bucket: str, key: str, local_path: str, content_type: Optional[str]) -> None:
+def _upload_path_to_storage(
+    *,
+    bucket: str,
+    key: str,
+    local_path: str,
+    content_type: Optional[str],
+    cache_control: Optional[str] = None,
+) -> None:
     storage_service.provider.put_file(
         bucket=bucket,
         key=key,
         file_path=local_path,
         content_type=content_type,
+        cache_control=cache_control,
     )
 
 
@@ -277,6 +295,42 @@ def _create_temp_workspace(prefix: str) -> str:
 def _cleanup_temp_workspace(temp_dir: Optional[str]) -> None:
     if temp_dir:
         storage_service.cleanup_temp_dir(temp_dir)
+
+
+def _queue_pose_analysis_job(
+    *,
+    db: Session,
+    video_id: str,
+    owner_id: str,
+    background_tasks: BackgroundTasks,
+) -> PoseAnalysisJob:
+    active_job = (
+        db.query(PoseAnalysisJob)
+        .filter(
+            PoseAnalysisJob.video_id == video_id,
+            PoseAnalysisJob.status.in_([POSE_JOB_STATUS_PENDING, POSE_JOB_STATUS_RUNNING]),
+        )
+        .order_by(PoseAnalysisJob.created_at.desc())
+        .first()
+    )
+    if active_job:
+        return active_job
+
+    owner_uuid = analysis_report_service._parse_user_id(owner_id)
+    job = PoseAnalysisJob(
+        user_id=owner_uuid,
+        video_id=video_id,
+        status=POSE_JOB_STATUS_PENDING,
+    )
+    db.add(job)
+    video_record = _get_video_record(db, video_id)
+    if video_record:
+        video_record.pose_status = POSE_JOB_STATUS_PENDING
+        video_record.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(job)
+    background_tasks.add_task(_run_pose_job, str(job.id))
+    return job
 
 
 def _run_pose_pipeline_for_record(
@@ -319,13 +373,15 @@ def _run_pose_pipeline_for_record(
             raise ValueError("Pose analysis output missing pose_data_path")
 
         owner_id = str(video_record.user_id)
-        pose_key = video_record.pose_data_key or video_service.build_pose_data_key(
+        pose_key = video_service.build_pose_data_key(
             user_id=owner_id,
             video_id=video_record.id,
+            version=work_id,
         )
-        overlay_key = video_record.overlay_key or video_service.build_overlay_key(
+        overlay_key = video_service.build_overlay_key(
             user_id=owner_id,
             video_id=video_record.id,
+            version=work_id,
         )
         target_bucket = video_record.source_bucket or storage_service.default_bucket
 
@@ -334,12 +390,14 @@ def _run_pose_pipeline_for_record(
             key=pose_key,
             local_path=pose_data_path,
             content_type="application/json",
+            cache_control=DERIVED_OBJECT_CACHE_CONTROL,
         )
         _upload_path_to_storage(
             bucket=target_bucket,
             key=overlay_key,
             local_path=overlay_path,
             content_type="video/mp4",
+            cache_control=DERIVED_OBJECT_CACHE_CONTROL,
         )
 
         video_record.pose_data_bucket = target_bucket
@@ -465,44 +523,93 @@ def _decode_pose_job_result(job: PoseAnalysisJob) -> Optional[PoseAnalyzeRespons
         return None
 
 
-def _find_active_pose_job(db: Session, video_id: str) -> Optional[PoseAnalysisJob]:
+def _normalize_optional_session_id(raw_session_id: Optional[str]) -> Optional[str]:
+    if raw_session_id is None:
+        return None
+    value = raw_session_id.strip()
+    return value or None
+
+
+def _resolve_video_chat_session(
+    db: Session,
+    *,
+    user_id: UUID,
+    video_id: str,
+    preferred_session_id: Optional[str] = None,
+) -> Optional[ChatSession]:
+    if preferred_session_id:
+        try:
+            preferred_uuid = UUID(preferred_session_id)
+        except ValueError:
+            preferred_uuid = None
+        if preferred_uuid:
+            preferred_session = (
+                db.query(ChatSession)
+                .filter(
+                    ChatSession.id == preferred_uuid,
+                    ChatSession.user_id == user_id,
+                    ChatSession.video_id == video_id,
+                    ChatSession.session_type == CHAT_SESSION_TYPE_VIDEO,
+                    ChatSession.is_archived.is_(False),
+                )
+                .first()
+            )
+            if preferred_session:
+                return preferred_session
+
     return (
-        db.query(PoseAnalysisJob)
+        db.query(ChatSession)
         .filter(
-            PoseAnalysisJob.video_id == video_id,
-            PoseAnalysisJob.status.in_([POSE_JOB_STATUS_PENDING, POSE_JOB_STATUS_RUNNING]),
+            ChatSession.user_id == user_id,
+            ChatSession.video_id == video_id,
+            ChatSession.session_type == CHAT_SESSION_TYPE_VIDEO,
+            ChatSession.is_archived.is_(False),
         )
-        .order_by(PoseAnalysisJob.created_at.desc())
+        .order_by(ChatSession.updated_at.desc())
         .first()
     )
 
 
-def _enqueue_pose_job_if_needed(
-    *,
+def _append_analysis_completion_notice(
     db: Session,
-    background_tasks: BackgroundTasks,
+    *,
+    user_id: UUID,
     video_id: str,
-    owner_id: str,
-) -> PoseAnalysisJob:
-    active_job = _find_active_pose_job(db, video_id)
-    if active_job:
-        return active_job
-
-    owner_uuid = analysis_report_service._parse_user_id(owner_id)
-    job = PoseAnalysisJob(
-        user_id=owner_uuid,
+    preferred_session_id: Optional[str] = None,
+) -> bool:
+    session = _resolve_video_chat_session(
+        db,
+        user_id=user_id,
         video_id=video_id,
-        status=POSE_JOB_STATUS_PENDING,
+        preferred_session_id=preferred_session_id,
     )
-    db.add(job)
-    video_record = _get_video_record(db, video_id)
-    if video_record:
-        video_record.pose_status = POSE_JOB_STATUS_PENDING
-    db.commit()
-    db.refresh(job)
-    background_tasks.add_task(_run_pose_job, str(job.id))
-    logger.info("pose_job_enqueued job_id=%s video_id=%s source=overlay", str(job.id), video_id)
-    return job
+    if not session:
+        return False
+
+    existing_notice = (
+        db.query(ChatMessage.id)
+        .filter(
+            ChatMessage.session_id == session.id,
+            ChatMessage.role == "assistant",
+            ChatMessage.content == ANALYSIS_COMPLETION_NOTICE,
+        )
+        .first()
+    )
+    if existing_notice:
+        return False
+
+    now = datetime.utcnow()
+    db.add(
+        ChatMessage(
+            session_id=session.id,
+            user_id=user_id,
+            role="assistant",
+            content=ANALYSIS_COMPLETION_NOTICE,
+        )
+    )
+    session.last_message_at = now
+    session.updated_at = now
+    return True
 
 
 def _run_pose_job(job_id: str) -> None:
@@ -548,6 +655,11 @@ def _run_pose_job(job_id: str) -> None:
                 video_path,
                 job.video_id,
             )
+            pose_analysis_service.generate_pose_overlay(
+                video_path=video_path,
+                video_id=job.video_id,
+                pose_data=result,
+            )
 
         payload = PoseAnalyzeResponse(
             video_id=job.video_id,
@@ -584,7 +696,7 @@ def _run_pose_job(job_id: str) -> None:
         db.close()
 
 
-async def _run_report_job(job_id: str) -> None:
+async def _run_report_job(job_id: str, preferred_chat_session_id: Optional[str] = None) -> None:
     db = SessionLocal()
     try:
         parsed_job_id = UUID(job_id)
@@ -640,6 +752,12 @@ async def _run_report_job(job_id: str) -> None:
         job.error_message = None
         if video_record:
             video_record.report_status = REPORT_JOB_STATUS_COMPLETED
+        _append_analysis_completion_notice(
+            db,
+            user_id=job.user_id,
+            video_id=job.video_id,
+            preferred_session_id=preferred_chat_session_id,
+        )
         db.commit()
         logger.info("report_job_completed job_id=%s video_id=%s", str(job.id), job.video_id)
     except Exception as exc:
@@ -1201,7 +1319,7 @@ async def analyze_pose(
             result = _run_pose_pipeline_for_record(
                 db=db,
                 video_record=video_record,
-                work_id=f"sync-{request.video_id}",
+                work_id=f"sync-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}",
             )
         else:
             video_path = video_service.get_video_path(request.video_id)
@@ -1243,22 +1361,13 @@ async def create_pose_analysis_job(
 ):
     metadata = ensure_video_access(video_id, current_user, db=db)
     _ensure_video_uploaded(metadata)
-    owner_id = metadata.get("user_id") or str(current_user.id)
-    owner_uuid = analysis_report_service._parse_user_id(owner_id)
-
-    job = PoseAnalysisJob(
-        user_id=owner_uuid,
+    owner_id = str(metadata.get("user_id") or current_user.id)
+    job = _queue_pose_analysis_job(
+        db=db,
         video_id=video_id,
-        status=POSE_JOB_STATUS_PENDING,
+        owner_id=owner_id,
+        background_tasks=background_tasks,
     )
-    db.add(job)
-    video_record = _get_video_record(db, video_id)
-    if video_record:
-        video_record.pose_status = POSE_JOB_STATUS_PENDING
-    db.commit()
-    db.refresh(job)
-
-    background_tasks.add_task(_run_pose_job, str(job.id))
 
     return PoseAnalysisJobCreateResponse(
         job_id=str(job.id),
@@ -1396,6 +1505,7 @@ async def create_pose_report_job(
     background_tasks: BackgroundTasks,
     athlete_slot: Optional[AthleteSlot] = Query(default=None),
     force_regenerate: bool = Query(default=False),
+    chat_session_id: Optional[str] = Query(default=None),
     current_user: User = Depends(get_current_user_required),
     db: Session = Depends(get_db),
 ):
@@ -1410,6 +1520,27 @@ async def create_pose_report_job(
     owner_id = metadata.get("user_id") or str(current_user.id)
     owner_uuid = analysis_report_service._parse_user_id(owner_id)
     requested_slot = _normalize_requested_slot(athlete_slot)
+    preferred_chat_session_id = _normalize_optional_session_id(chat_session_id)
+    if preferred_chat_session_id:
+        try:
+            preferred_chat_session_uuid = UUID(preferred_chat_session_id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid chat_session_id",
+            ) from exc
+        session = _resolve_video_chat_session(
+            db,
+            user_id=owner_uuid,
+            video_id=video_id,
+            preferred_session_id=preferred_chat_session_id,
+        )
+        if not session or session.id != preferred_chat_session_uuid:
+            raise HTTPException(
+                status_code=404,
+                detail="Chat session not found for this video",
+            )
+
     job = AnalysisReportJob(
         user_id=owner_uuid,
         video_id=video_id,
@@ -1424,7 +1555,7 @@ async def create_pose_report_job(
     db.commit()
     db.refresh(job)
 
-    background_tasks.add_task(_run_report_job, str(job.id))
+    background_tasks.add_task(_run_report_job, str(job.id), preferred_chat_session_id)
 
     response_slot = AthleteSlot(requested_slot) if requested_slot in {"left", "right"} else None
     return AnalysisReportJobCreateResponse(
@@ -1470,13 +1601,11 @@ async def get_pose_overlay(
     db: Session = Depends(get_db),
 ):
     """
-    Get or generate pose overlay video for a video.
-
-    This endpoint generates a video with pose skeleton overlay.
+    Return cached pose overlay url/path when available.
+    If not available, enqueue async pose job and return 202.
     """
     metadata = ensure_video_access(video_id, current_user, db=db)
     _ensure_video_uploaded(metadata)
-
     if storage_service.provider_name == "cos" and metadata.get("overlay_bucket") and metadata.get("overlay_key"):
         overlay_bucket = str(metadata["overlay_bucket"])
         overlay_key = str(metadata["overlay_key"])
@@ -1488,30 +1617,39 @@ async def get_pose_overlay(
             return PoseOverlayResponse(
                 video_id=video_id,
                 overlay_video_path=signed_url,
-                message="Pose overlay video (cached)"
+                message="Pose overlay video (cached)",
+                status=POSE_JOB_STATUS_COMPLETED,
             )
-    local_overlay_path = pose_analysis_service.get_overlay_path(video_id)
-    if local_overlay_path and Path(local_overlay_path).exists():
-        return PoseOverlayResponse(
-            video_id=video_id,
-            overlay_video_path=local_overlay_path,
-            message="Pose overlay video (cached)"
-        )
+    else:
+        overlay_path = pose_analysis_service.get_overlay_path(video_id)
+        if overlay_path:
+            return PoseOverlayResponse(
+                video_id=video_id,
+                overlay_video_path=overlay_path,
+                message="Pose overlay video (cached)",
+                status=POSE_JOB_STATUS_COMPLETED,
+            )
 
-    owner_id = str(metadata.get("user_id") or (current_user.id if current_user else ""))
+    owner_id = metadata.get("user_id")
+    if not owner_id and current_user:
+        owner_id = str(current_user.id)
     if not owner_id:
-        raise HTTPException(status_code=500, detail="Video owner is missing")
+        raise HTTPException(status_code=500, detail="Unable to resolve video owner for pose job")
 
-    _enqueue_pose_job_if_needed(
+    job = _queue_pose_analysis_job(
         db=db,
-        background_tasks=background_tasks,
         video_id=video_id,
-        owner_id=owner_id,
+        owner_id=str(owner_id),
+        background_tasks=background_tasks,
     )
-    raise HTTPException(
-        status_code=409,
-        detail="Pose overlay is being generated in background. Please retry in a few seconds.",
+    payload = PoseOverlayResponse(
+        video_id=video_id,
+        overlay_video_path=None,
+        message="Pose overlay is not ready. Pose analysis job is queued.",
+        status=job.status,
+        job_id=str(job.id),
     )
+    return JSONResponse(status_code=202, content=payload.model_dump())
 
 
 @router.get("/{video_id}/pose-overlay/file")
@@ -1522,11 +1660,11 @@ async def get_pose_overlay_file(
     db: Session = Depends(get_db),
 ):
     """
-    Serve pose overlay video for playback, generating it on demand if needed.
+    Serve cached pose overlay for playback.
+    If overlay is missing, enqueue async pose job and return 409.
     """
     metadata = ensure_video_access(video_id, current_user, db=db)
     _ensure_video_uploaded(metadata)
-
     if storage_service.provider_name == "cos" and metadata.get("overlay_bucket") and metadata.get("overlay_key"):
         overlay_bucket = str(metadata["overlay_bucket"])
         overlay_key = str(metadata["overlay_key"])
@@ -1536,29 +1674,35 @@ async def get_pose_overlay_file(
                 key=overlay_key,
             )
             return RedirectResponse(url=signed_url, status_code=302)
+    else:
+        overlay_path = pose_analysis_service.get_overlay_path(video_id)
+        if overlay_path:
+            media_type, _ = mimetypes.guess_type(overlay_path)
+            return FileResponse(
+                overlay_path,
+                media_type=media_type or "video/mp4",
+                headers={"Accept-Ranges": "bytes"},
+            )
 
-    overlay_path = pose_analysis_service.get_overlay_path(video_id)
-    if overlay_path and Path(overlay_path).exists():
-        media_type, _ = mimetypes.guess_type(overlay_path)
-        return FileResponse(
-            overlay_path,
-            media_type=media_type or "video/mp4",
-            headers={"Accept-Ranges": "bytes"},
-        )
-
-    owner_id = str(metadata.get("user_id") or (current_user.id if current_user else ""))
+    owner_id = metadata.get("user_id")
+    if not owner_id and current_user:
+        owner_id = str(current_user.id)
     if not owner_id:
-        raise HTTPException(status_code=500, detail="Video owner is missing")
+        raise HTTPException(status_code=500, detail="Unable to resolve video owner for pose job")
 
-    _enqueue_pose_job_if_needed(
+    job = _queue_pose_analysis_job(
         db=db,
-        background_tasks=background_tasks,
         video_id=video_id,
-        owner_id=owner_id,
+        owner_id=str(owner_id),
+        background_tasks=background_tasks,
     )
     raise HTTPException(
         status_code=409,
-        detail="Pose overlay file is still being generated. Please retry shortly.",
+        detail={
+            "message": "Pose overlay is generating. Retry playback shortly.",
+            "job_id": str(job.id),
+            "status": job.status,
+        },
     )
 
 

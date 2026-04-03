@@ -23,6 +23,7 @@ import {
   type PoseData,
   type SlotPoseFrame,
 } from "@/lib/pose-data";
+import { waitForPoseAnalysisJob } from "@/lib/pose-analysis-job";
 import { ReportMarkdown } from "@/components/report-markdown";
 import { TopNav } from "@/components/top-nav";
 
@@ -64,6 +65,14 @@ type ReplayMode = "original" | "skeleton";
 
 type HandSide = "left" | "right";
 type DominantSideMode = "auto" | HandSide;
+
+interface PoseOverlayPrepareResponse {
+  video_id: string;
+  overlay_video_path?: string | null;
+  message?: string;
+  status?: string;
+  job_id?: string | null;
+}
 
 const isAbortError = (error: unknown): boolean =>
   (error instanceof DOMException && error.name === "AbortError") ||
@@ -778,21 +787,51 @@ export default function VideoDetail() {
       if (abortController.signal.aborted) {
         return;
       }
-      if (!response.ok) {
-        let message = "Failed to prepare skeleton replay";
-        try {
-          const payload = await response.json();
-          if (payload && typeof payload.detail === "string" && payload.detail.trim().length > 0) {
-            message = payload.detail;
-          }
-        } catch {
-          // keep default message
+      if (response.status === 202) {
+        const queued = (await response.json()) as PoseOverlayPrepareResponse;
+        if (abortController.signal.aborted) {
+          return;
         }
-        throw new Error(message);
+        if (!queued.job_id) {
+          throw new Error(queued.message || "Pose overlay queued, but job id is missing");
+        }
+
+        await waitForPoseAnalysisJob(videoId, queued.job_id, {
+          pollIntervalMs: 1500,
+          timeoutMs: 900000,
+        });
+        if (abortController.signal.aborted) {
+          return;
+        }
+
+        const readyResponse = await authFetch(`/video/${videoId}/pose-overlay`, {
+          signal: abortController.signal,
+        });
+        if (abortController.signal.aborted) {
+          return;
+        }
+        if (!readyResponse.ok) {
+          throw new Error("Pose overlay is still not ready");
+        }
+        const readyData = (await readyResponse.json()) as PoseOverlayPrepareResponse;
+        if (abortController.signal.aborted) {
+          return;
+        }
+        if (!readyData.overlay_video_path) {
+          throw new Error(readyData.message || "Pose overlay is still not ready");
+        }
+        setSkeletonReady(true);
+        return;
       }
-      await response.json();
+      if (!response.ok) {
+        throw new Error("Failed to prepare skeleton replay");
+      }
+      const data = (await response.json()) as PoseOverlayPrepareResponse;
       if (abortController.signal.aborted) {
         return;
+      }
+      if (!data.overlay_video_path) {
+        throw new Error(data.message || "Pose overlay is still not ready");
       }
       setSkeletonReady(true);
     } catch (err) {

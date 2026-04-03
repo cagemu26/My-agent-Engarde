@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { TopNav } from "@/components/top-nav";
 import { authFetch } from "@/lib/api";
+import { useAppDialog } from "@/components/app-dialog-provider";
 
 const TRAINING_NAV_LINKS = [
   { href: "/analyze", label: "Analyze" },
@@ -110,6 +111,7 @@ const sortDailyLogs = (a: TrainingLogItem, b: TrainingLogItem) => {
 
 export default function TrainingPage() {
   const router = useRouter();
+  const { confirm } = useAppDialog();
   const todayKey = useMemo(() => formatDateKey(new Date()), []);
 
   const [selectedDateKey, setSelectedDateKey] = useState(todayKey);
@@ -388,7 +390,14 @@ export default function TrainingPage() {
 
   const handleDelete = useCallback(async () => {
     if (!selectedLogId) return;
-    if (!window.confirm("Delete this training entry? This action cannot be undone.")) return;
+    const confirmed = await confirm({
+      title: "Delete this training entry?",
+      description: "This action cannot be undone.",
+      confirmText: "Delete",
+      cancelText: "Cancel",
+      danger: true,
+    });
+    if (!confirmed) return;
 
     try {
       setIsDeleting(true);
@@ -411,7 +420,7 @@ export default function TrainingPage() {
     } finally {
       setIsDeleting(false);
     }
-  }, [loadLogs, refreshSelectedDateEntries, resetForm, selectedDateKey, selectedLogId]);
+  }, [confirm, loadLogs, refreshSelectedDateEntries, resetForm, selectedDateKey, selectedLogId]);
 
   const handleCloseEditor = useCallback(() => {
     setIsEditorExpanded(false);

@@ -39,6 +39,7 @@ import {
 import { ChatMarkdown } from "@/components/chat-markdown";
 import { ReportMarkdown } from "@/components/report-markdown";
 import { TopNav } from "@/components/top-nav";
+import { useAppDialog } from "@/components/app-dialog-provider";
 
 interface Message {
   role: "user" | "assistant";
@@ -75,6 +76,7 @@ interface HistoryItem {
   score: string;
   tournament: string;
   upload_time: string;
+  upload_status?: string;
 }
 
 interface AnalysisReportRecord {
@@ -394,6 +396,7 @@ const getResultLabel = (matchResult: string) => {
 function AnalyzeContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { confirm, alert } = useAppDialog();
 
   const [activeTab, setActiveTab] = useState<AnalyzeTab>("chat");
   const [messages, setMessages] = useState<Message[]>([
@@ -472,6 +475,8 @@ function AnalyzeContent() {
   const processingProgressTimerRef = useRef<number | null>(null);
   const hasInitializedDefaultSessionRef = useRef(false);
   const selectedHistoryVideoIdRef = useRef<string | null>(null);
+  const activeChatVideoIdRef = useRef<string | null>(null);
+  const activeChatSessionIdRef = useRef<string | null>(null);
   const historyDetailAbortRef = useRef<AbortController | null>(null);
   const activeStreamAbortRef = useRef<AbortController | null>(null);
   const activeStreamIdRef = useRef(0);
@@ -553,6 +558,14 @@ function AnalyzeContent() {
   useEffect(() => {
     selectedHistoryVideoIdRef.current = selectedHistoryVideoId;
   }, [selectedHistoryVideoId]);
+
+  useEffect(() => {
+    activeChatVideoIdRef.current = activeChatVideoId;
+  }, [activeChatVideoId]);
+
+  useEffect(() => {
+    activeChatSessionIdRef.current = activeChatSessionId;
+  }, [activeChatSessionId]);
 
   const extractPoseFrames = useCallback((poseData: PoseData | null, athleteSlot: AthleteSlot) => {
     const slotFrames = getSlotPoseFrames(poseData, athleteSlot);
@@ -1236,7 +1249,13 @@ function AnalyzeContent() {
         throw new Error("Failed to fetch videos");
       }
       const data = await response.json();
-      setHistoryVideos(data.videos || []);
+      const videos = Array.isArray(data.videos) ? (data.videos as HistoryItem[]) : [];
+      setHistoryVideos(
+        videos.filter((item) => {
+          const status = (item.upload_status || "").trim().toLowerCase();
+          return !status || status === "uploaded";
+        }),
+      );
     } catch {
       // Keep previous video list on transient failures.
     } finally {
@@ -1483,7 +1502,6 @@ function AnalyzeContent() {
         forceNewSession?: boolean;
         switchToChat?: boolean;
         reportText?: string;
-        completionNotice?: string;
         preloaded?: { video: HistoryItem; pose: PoseData | null; report: AnalysisReportRecord | null } | null;
       },
     ) => {
@@ -1562,16 +1580,6 @@ function AnalyzeContent() {
           );
           nextMessages = [{ role: "assistant", content: handoffMessage }];
           nextNeedsFullContext = true;
-        }
-
-        if (options?.completionNotice) {
-          const noticeMessage = options.completionNotice.trim();
-          if (noticeMessage) {
-            nextMessages = [
-              ...nextMessages,
-              { role: "assistant", content: noticeMessage },
-            ];
-          }
         }
 
         setMessages(nextMessages);
@@ -2110,26 +2118,82 @@ function AnalyzeContent() {
     setVideoFile((prev) => (prev ? { ...prev, status: "uploading", progress: 8 } : null));
 
     try {
-      const formData = new FormData();
-      formData.append("file", videoFile.file);
-      formData.append("title", metadata.title || videoFile.name);
-      formData.append("athlete", metadata.athlete);
-      formData.append("opponent", metadata.opponent);
-      formData.append("weapon", selectedWeapon);
-      formData.append("match_result", metadata.matchResult);
-      formData.append("score", metadata.score);
-      formData.append("tournament", metadata.tournament);
-
-      const uploadResponse = await authFetch("/video/upload-with-metadata", {
+      const initiateResponse = await authFetch("/video/uploads/initiate", {
         method: "POST",
-        body: formData,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filename: videoFile.file.name,
+          content_type: videoFile.file.type || "video/mp4",
+          file_size: videoFile.file.size,
+          title: metadata.title || videoFile.name,
+          athlete: metadata.athlete,
+          opponent: metadata.opponent,
+          weapon: selectedWeapon,
+          match_result: metadata.matchResult,
+          score: metadata.score,
+          tournament: metadata.tournament,
+        }),
       });
 
-      if (!uploadResponse.ok) {
-        throw new Error("Upload failed");
+      let uploadData: { video_id: string };
+      if (initiateResponse.ok) {
+        const initiateData = (await initiateResponse.json()) as {
+          video_id: string;
+          upload_url: string;
+          method?: string;
+          headers?: Record<string, string>;
+        };
+        setVideoFile((prev) => (prev ? { ...prev, progress: 20, id: initiateData.video_id } : null));
+
+        const putHeaders = new Headers(initiateData.headers || {});
+        if (!putHeaders.has("Content-Type") && videoFile.file.type) {
+          putHeaders.set("Content-Type", videoFile.file.type);
+        }
+        const objectUploadResponse = await fetch(initiateData.upload_url, {
+          method: initiateData.method || "PUT",
+          headers: putHeaders,
+          body: videoFile.file,
+        });
+        if (!objectUploadResponse.ok) {
+          throw new Error("Object upload failed");
+        }
+        setVideoFile((prev) => (prev ? { ...prev, progress: 46, id: initiateData.video_id } : null));
+
+        const completeResponse = await authFetch("/video/uploads/complete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            video_id: initiateData.video_id,
+            file_size: videoFile.file.size,
+            content_type: videoFile.file.type || "video/mp4",
+          }),
+        });
+        if (!completeResponse.ok) {
+          throw new Error("Upload completion verification failed");
+        }
+        uploadData = { video_id: initiateData.video_id };
+      } else {
+        // Backward-compatible fallback for local or legacy deployments.
+        const formData = new FormData();
+        formData.append("file", videoFile.file);
+        formData.append("title", metadata.title || videoFile.name);
+        formData.append("athlete", metadata.athlete);
+        formData.append("opponent", metadata.opponent);
+        formData.append("weapon", selectedWeapon);
+        formData.append("match_result", metadata.matchResult);
+        formData.append("score", metadata.score);
+        formData.append("tournament", metadata.tournament);
+
+        const uploadResponse = await authFetch("/video/upload-with-metadata", {
+          method: "POST",
+          body: formData,
+        });
+        if (!uploadResponse.ok) {
+          throw new Error("Upload failed");
+        }
+        uploadData = (await uploadResponse.json()) as { video_id: string };
       }
 
-      const uploadData = await uploadResponse.json();
       setVideoFile((prev) => (prev ? { ...prev, progress: 55, id: uploadData.video_id } : null));
       setVideoFile((prev) => (prev ? { ...prev, status: "processing", progress: 62 } : null));
       startProcessingProgress();
@@ -2168,8 +2232,13 @@ function AnalyzeContent() {
                   ? { ...prev, progress: Math.max(prev.progress, 92) }
                   : prev,
               );
+              const linkedSessionId =
+                (activeChatVideoIdRef.current === uploadData.video_id
+                  ? activeChatSessionIdRef.current
+                  : null) || readVideoSession(uploadData.video_id)?.session_id || null;
               const reportJob = await startAnalysisReportJob(uploadData.video_id, {
                 forceRegenerate: false,
+                chatSessionId: linkedSessionId,
               });
               const jobStatus = await waitForAnalysisReportJob<AnalysisReportRecord>(
                 uploadData.video_id,
@@ -2183,6 +2252,26 @@ function AnalyzeContent() {
                   jobStatus.results[0];
                 if (preferredSlotReport) {
                   setHistoryReport(preferredSlotReport);
+                }
+              }
+
+              const activeSessionId =
+                activeChatVideoIdRef.current === uploadData.video_id
+                  ? activeChatSessionIdRef.current
+                  : null;
+              if (activeSessionId) {
+                const detail = await loadBackendChatSessionDetail(activeSessionId);
+                if (
+                  detail &&
+                  activeChatVideoIdRef.current === uploadData.video_id &&
+                  activeChatSessionIdRef.current === activeSessionId
+                ) {
+                  const restoredMessages: Message[] = detail.messages?.length
+                    ? detail.messages
+                        .filter((item) => item.role === "user" || item.role === "assistant")
+                        .map((item) => ({ role: item.role, content: item.content }))
+                    : [{ role: "assistant", content: DEFAULT_CHAT_OPENING }];
+                  setMessages(restoredMessages);
                 }
               }
             } catch (reportError) {
@@ -2242,8 +2331,6 @@ function AnalyzeContent() {
         forceNewSession: true,
         switchToChat: true,
         reportText: reportMessage,
-        completionNotice:
-          "分析已完成。可前往历史详情页面查看分析细节，再回来继续提问。",
         preloaded,
       });
       void fetchHistoryVideos();
@@ -2255,12 +2342,19 @@ function AnalyzeContent() {
     }
   };
 
-  const handleRemoveVideo = () => {
+  const handleRemoveVideo = async () => {
     const message =
       videoFile?.status === "uploading" || videoFile?.status === "processing"
         ? "Analysis is in progress. Remove this video and stop the current task?"
         : "Remove this selected video?";
-    if (!window.confirm(message)) return;
+    const confirmed = await confirm({
+      title: "Remove video?",
+      description: message,
+      confirmText: "Remove",
+      cancelText: "Keep",
+      danger: true,
+    });
+    if (!confirmed) return;
 
     stopProcessingProgress();
     setVideoFile(null);
@@ -2635,11 +2729,17 @@ function AnalyzeContent() {
 
       const normalizedType = normalizeSessionType(session.session_type);
       const isVideoSession = normalizedType === SESSION_TYPE_VIDEO && Boolean(session.video_id);
-      const confirmMessage = isVideoSession
-        ? "Delete this video session?\n\nThis will permanently delete all related video-analysis sessions, messages, video assets, and reports for this video. This action cannot be undone."
-        : "Delete this session and all its messages? This action cannot be undone.";
 
-      if (!window.confirm(confirmMessage)) {
+      const confirmed = await confirm({
+        title: isVideoSession ? "Delete this video session?" : "Delete this session?",
+        description: isVideoSession
+          ? "This will permanently delete all related video-analysis sessions, messages, video assets, and reports for this video. This action cannot be undone."
+          : "This will permanently delete the session and all its messages. This action cannot be undone.",
+        confirmText: "Delete",
+        cancelText: "Cancel",
+        danger: true,
+      });
+      if (!confirmed) {
         return;
       }
 
@@ -2685,7 +2785,11 @@ function AnalyzeContent() {
       } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to delete session";
         setChatSessionsError(message);
-        window.alert(message);
+        await alert({
+          title: "Delete failed",
+          description: message,
+          confirmText: "OK",
+        });
       } finally {
         setDeletingSessionId(null);
       }
@@ -2697,6 +2801,8 @@ function AnalyzeContent() {
       fetchChatSessions,
       fetchHistoryVideos,
       handleNewChatSession,
+      confirm,
+      alert,
       selectedHistoryVideoId,
     ],
   );

@@ -19,6 +19,7 @@ interface EnsureAnalysisReportOptions {
 interface EnsureAnalysisReportAsyncOptions {
   athleteSlot?: AthleteSlot | null;
   forceRegenerate?: boolean;
+  chatSessionId?: string | null;
   timeoutMs?: number;
   pollIntervalMs?: number;
 }
@@ -247,6 +248,9 @@ export async function startAnalysisReportJob(
   }
   if (options.forceRegenerate) {
     query.set("force_regenerate", "true");
+  }
+  if (options.chatSessionId) {
+    query.set("chat_session_id", options.chatSessionId);
   }
   const suffix = query.toString();
   const response = await authFetch(

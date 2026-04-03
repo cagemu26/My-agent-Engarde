@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from app.core.config import settings
@@ -33,6 +33,14 @@ app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(feedback_router)
 app.include_router(training_router)
+
+
+@app.middleware("http")
+async def apply_no_store_cache_headers(request: Request, call_next):
+    response = await call_next(request)
+    if "cache-control" not in response.headers:
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def _validate_security_settings() -> None:

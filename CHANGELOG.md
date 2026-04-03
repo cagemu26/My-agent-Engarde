@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.1.4 - 2026-04-02
+
+### Overview
+- Added video-analysis completion notices that can be appended back into the related chat session after report jobs finish.
+- Replaced native browser confirm and auth-expired alerts with the shared in-app dialog flow, and refreshed auth page branding with the unified logo component.
+- Added CDN-oriented media delivery and static asset configuration across backend, frontend build, Docker, and nginx deployment settings.
+
 ## v1.1.3 - 2026-04-02
 
 ### Overview

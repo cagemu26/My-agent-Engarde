@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { buildApiUrl } from "@/lib/api";
 import { TopNav } from "@/components/top-nav";
+import { useAppDialog } from "@/components/app-dialog-provider";
 
 const ADMIN_NAV_LINKS = [
   { href: "/analyze", label: "Analyze" },
@@ -26,6 +27,7 @@ interface Invitation {
 
 export default function InvitationsPage() {
   const { user, token, isLoading } = useAuth();
+  const { confirm } = useAppDialog();
   const router = useRouter();
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [loading, setLoading] = useState(true);
@@ -133,7 +135,14 @@ export default function InvitationsPage() {
   };
 
   const deleteInvitation = async (id: string) => {
-    if (!window.confirm("Delete this invitation code? This action cannot be undone.")) return;
+    const confirmed = await confirm({
+      title: "Delete invitation code?",
+      description: "This action cannot be undone.",
+      confirmText: "Delete",
+      cancelText: "Cancel",
+      danger: true,
+    });
+    if (!confirmed) return;
 
     try {
       const response = await fetch(buildApiUrl(`/api/admin/invitations/${id}`), {

@@ -70,10 +70,10 @@ export function authFetch(path: string, init: RequestInit = {}): Promise<Respons
           detail: {
             status: response.status,
             path,
+            message: "登录状态已失效，请重新登录。",
           },
         }),
       );
-      window.alert("登录已失效，请重新登录。");
     }
 
     return response;

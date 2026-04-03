@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     COS_DERIVED_PREFIX: str = "derived"
     COS_STS_EXPIRE_SECONDS: int = 900
     COS_SIGNED_URL_EXPIRE_SECONDS: int = 900
+    CDN_ENABLED: bool = False
+    CDN_STATIC_BASE_URL: str = ""
+    CDN_MEDIA_BASE_URL: str = ""
+    CDN_MEDIA_SIGN_KEY: str = ""
+    CDN_MEDIA_SIGN_EXPIRE_SECONDS: int = 600
+    CDN_MEDIA_ANTI_HOTLINK_ENABLED: bool = True
 
     CHROMA_PERSIST_DIR: str = "./data/chroma"
     KB_DATA_DIR: str = "./knowledge"
@@ -133,6 +139,19 @@ class Settings(BaseSettings):
         if parsed <= 0:
             raise ValueError("COS expiry seconds must be greater than 0")
         return parsed
+
+    @field_validator("CDN_MEDIA_SIGN_EXPIRE_SECONDS", mode="before")
+    @classmethod
+    def _validate_positive_cdn_expire_seconds(cls, value: Any) -> int:
+        parsed = int(value)
+        if parsed <= 0:
+            raise ValueError("CDN media sign expiry seconds must be greater than 0")
+        return parsed
+
+    @field_validator("CDN_STATIC_BASE_URL", "CDN_MEDIA_BASE_URL", mode="before")
+    @classmethod
+    def _normalize_cdn_base_url(cls, value: Any) -> str:
+        return str(value or "").strip().rstrip("/")
 
     class Config:
         env_file = ".env"
