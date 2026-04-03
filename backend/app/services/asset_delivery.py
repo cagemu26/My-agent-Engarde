@@ -22,7 +22,7 @@ class AssetDeliveryService:
         return bucket == storage_service.default_bucket
 
     def _build_cdn_object_url(self, *, key: str) -> str:
-        normalized_key = quote(key.strip().lstrip("/"), safe="/._-~%")
+        normalized_key = quote(key.strip().lstrip("/"), safe="/._-~")
         return f"{settings.CDN_MEDIA_BASE_URL}/{normalized_key}"
 
     def _apply_tencent_type_a_signature(self, *, raw_url: str, expires_at: int) -> str:
