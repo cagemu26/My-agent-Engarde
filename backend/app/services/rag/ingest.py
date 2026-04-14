@@ -1,12 +1,37 @@
 import json
+import hashlib
+import re
+import unicodedata
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from app.services.rag.embedding import EmbeddingProvider
 
 
-SUPPORTED_EXTENSIONS = {".md", ".markdown", ".jsonl"}
+SUPPORTED_EXTENSIONS = {".md", ".markdown", ".jsonl", ".pdf"}
+
+TOPIC_PATH_HINTS = {
+    "rules": "rules",
+    "rule": "rules",
+    "training": "training",
+    "train": "training",
+    "equipment": "equipment",
+    "equip": "equipment",
+    "technique": "technique",
+    "tactics": "technique",
+}
+
+WEAPON_HINTS = {
+    "foil": "foil",
+    "花剑": "foil",
+    "epee": "epee",
+    "épée": "epee",
+    "重剑": "epee",
+    "sabre": "sabre",
+    "saber": "sabre",
+    "佩剑": "sabre",
+}
 
 
 class KBIngestService:
@@ -69,6 +94,8 @@ class KBIngestService:
                     records.extend(self._load_markdown(path))
                 elif path.suffix.lower() == ".jsonl":
                     records.extend(self._load_jsonl(path))
+                elif path.suffix.lower() == ".pdf":
+                    records.extend(self._load_pdf(path))
             except Exception as exc:
                 stats["warnings"].append(f"Failed to parse {path}: {exc}")
 
@@ -138,6 +165,7 @@ class KBIngestService:
             fallback_title=self._infer_title(path.stem, body),
             fallback_source=str(path),
             content=body,
+            source_path=path,
         )
         return [record]
 
@@ -182,10 +210,57 @@ class KBIngestService:
                         fallback_title=fallback_title,
                         fallback_source=fallback_source,
                         content=content,
+                        source_path=path,
                     )
                 )
 
         return records
+
+    def _load_pdf(self, path: Path) -> list[dict[str, Any]]:
+        try:
+            from pypdf import PdfReader
+        except ImportError as exc:
+            raise RuntimeError("PDF ingestion requires the 'pypdf' package") from exc
+
+        try:
+            reader = PdfReader(str(path))
+        except Exception as exc:
+            raise RuntimeError(f"Unable to open PDF: {exc}") from exc
+
+        page_blocks: list[str] = []
+        extracted_page_count = 0
+
+        for page_index, page in enumerate(reader.pages, start=1):
+            try:
+                page_text = page.extract_text() or ""
+            except Exception:
+                page_text = ""
+
+            normalized_page_text = self._normalize_pdf_text(page_text)
+            if not normalized_page_text:
+                continue
+
+            extracted_page_count += 1
+            page_blocks.append(f"[Page {page_index}]\n{normalized_page_text}")
+
+        if not page_blocks:
+            raise RuntimeError("PDF text extraction produced empty content; file may be scanned/image-only")
+
+        metadata = {
+            "title": path.stem,
+            "source": str(path),
+            "updated_at": datetime.utcfromtimestamp(path.stat().st_mtime).isoformat(),
+        }
+        record = self._normalize_record(
+            metadata,
+            fallback_doc_id=self._build_stable_doc_id(path),
+            fallback_title=path.stem,
+            fallback_source=str(path),
+            content="\n\n".join(page_blocks),
+            source_path=path,
+        )
+        record["source"] = f"{record['source']}#pages={extracted_page_count}"
+        return [record]
 
     def _normalize_record(
         self,
@@ -194,14 +269,19 @@ class KBIngestService:
         fallback_title: str,
         fallback_source: str,
         content: str,
+        source_path: Optional[Path] = None,
     ) -> dict[str, Any]:
         doc_id = str(metadata.get("doc_id") or fallback_doc_id).strip()
         title = str(metadata.get("title") or fallback_title).strip()
 
-        weapon = str(metadata.get("weapon") or "general").strip().lower()
-        topic = str(metadata.get("topic") or "general").strip().lower()
+        inferred_weapon = self._infer_weapon(source_path, title, content)
+        inferred_topic = self._infer_topic(source_path)
+        inferred_language = self._infer_language(content, title)
+
+        weapon = str(metadata.get("weapon") or inferred_weapon or "general").strip().lower()
+        topic = str(metadata.get("topic") or inferred_topic or "general").strip().lower()
         level = str(metadata.get("level") or "all").strip().lower()
-        language = str(metadata.get("language") or "zh").strip().lower()
+        language = str(metadata.get("language") or inferred_language or "zh").strip().lower()
         source = str(metadata.get("source") or fallback_source).strip()
         updated_at = str(metadata.get("updated_at") or "").strip()
 
@@ -277,3 +357,58 @@ class KBIngestService:
                 return clean.lstrip("#").strip() or stem
             return clean[:80]
         return stem
+
+    @staticmethod
+    def _normalize_pdf_text(text: str) -> str:
+        normalized = (text or "").replace("\x00", "").replace("\r\n", "\n").strip()
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        normalized = re.sub(r"[ \t]{2,}", " ", normalized)
+        return normalized.strip()
+
+    @staticmethod
+    def _build_stable_doc_id(path: Path) -> str:
+        path_key = path.as_posix()
+        digest = hashlib.sha1(path_key.encode("utf-8")).hexdigest()[:10]
+        slug = unicodedata.normalize("NFKD", path.stem)
+        slug = slug.encode("ascii", "ignore").decode("ascii")
+        slug = re.sub(r"[^a-zA-Z0-9]+", "-", slug).strip("-").lower()
+        if not slug:
+            slug = "doc"
+        return f"{slug}-{digest}"
+
+    def _infer_topic(self, source_path: Optional[Path]) -> str:
+        if source_path is None:
+            return "general"
+
+        for part in reversed(source_path.parts):
+            normalized = part.strip().lower()
+            if not normalized:
+                continue
+            if normalized in TOPIC_PATH_HINTS:
+                return TOPIC_PATH_HINTS[normalized]
+        return "general"
+
+    def _infer_weapon(self, source_path: Optional[Path], title: str, content: str) -> str:
+        haystacks = [title.lower()]
+        if source_path is not None:
+            haystacks.extend(part.lower() for part in source_path.parts)
+        preview = content[:2000].lower()
+        haystacks.append(preview)
+
+        for haystack in haystacks:
+            for hint, weapon in WEAPON_HINTS.items():
+                if hint in haystack:
+                    return weapon
+        return "general"
+
+    @staticmethod
+    def _infer_language(content: str, title: str) -> str:
+        sample = f"{title}\n{content[:3000]}"
+        cjk_count = len(re.findall(r"[\u4e00-\u9fff]", sample))
+        latin_count = len(re.findall(r"[A-Za-z]", sample))
+
+        if cjk_count == 0 and latin_count == 0:
+            return "zh"
+        if cjk_count >= latin_count and cjk_count > 0:
+            return "zh"
+        return "en"

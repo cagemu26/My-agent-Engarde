@@ -10,6 +10,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useLocale } from "@/lib/locale";
 
 type DialogKind = "alert" | "confirm";
 
@@ -38,30 +39,34 @@ const AppDialogContext = createContext<AppDialogContextValue | undefined>(undefi
 const normalizeDialogOptions = (
   options: string | AlertDialogOptions | ConfirmDialogOptions,
   kind: DialogKind,
+  isZh: boolean,
 ): ActiveDialog => {
   if (typeof options === "string") {
     return {
       kind,
-      title: kind === "confirm" ? "Please confirm" : "Notice",
+      title: kind === "confirm" ? (isZh ? "请确认" : "Please confirm") : isZh ? "提示" : "Notice",
       description: options,
-      confirmText: kind === "confirm" ? "Confirm" : "OK",
-      cancelText: "Cancel",
+      confirmText: kind === "confirm" ? (isZh ? "确认" : "Confirm") : "OK",
+      cancelText: isZh ? "取消" : "Cancel",
       danger: false,
     };
   }
 
   return {
     kind,
-    title: options.title?.trim() || (kind === "confirm" ? "Please confirm" : "Notice"),
+    title:
+      options.title?.trim() ||
+      (kind === "confirm" ? (isZh ? "请确认" : "Please confirm") : isZh ? "提示" : "Notice"),
     description: options.description?.trim() || "",
-    confirmText: options.confirmText?.trim() || (kind === "confirm" ? "Confirm" : "OK"),
+    confirmText: options.confirmText?.trim() || (kind === "confirm" ? (isZh ? "确认" : "Confirm") : "OK"),
     cancelText:
-      "cancelText" in options ? options.cancelText?.trim() || "Cancel" : "Cancel",
+      "cancelText" in options ? options.cancelText?.trim() || (isZh ? "取消" : "Cancel") : isZh ? "取消" : "Cancel",
     danger: "danger" in options ? Boolean(options.danger) : false,
   };
 };
 
 export function AppDialogProvider({ children }: { children: ReactNode }) {
+  const { isZh } = useLocale();
   const [dialog, setDialog] = useState<ActiveDialog | null>(null);
   const resolverRef = useRef<((result: boolean) => void) | null>(null);
 
@@ -75,7 +80,7 @@ export function AppDialogProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const confirm = useCallback((options: string | ConfirmDialogOptions) => {
-    const config = normalizeDialogOptions(options, "confirm");
+    const config = normalizeDialogOptions(options, "confirm", isZh);
     return new Promise<boolean>((resolve) => {
       if (resolverRef.current) {
         resolverRef.current(false);
@@ -83,10 +88,10 @@ export function AppDialogProvider({ children }: { children: ReactNode }) {
       resolverRef.current = resolve;
       setDialog(config);
     });
-  }, []);
+  }, [isZh]);
 
   const alert = useCallback((options: string | AlertDialogOptions) => {
-    const config = normalizeDialogOptions(options, "alert");
+    const config = normalizeDialogOptions(options, "alert", isZh);
     return new Promise<void>((resolve) => {
       if (resolverRef.current) {
         resolverRef.current(false);
@@ -94,7 +99,7 @@ export function AppDialogProvider({ children }: { children: ReactNode }) {
       resolverRef.current = () => resolve();
       setDialog(config);
     });
-  }, []);
+  }, [isZh]);
 
   useEffect(() => {
     if (!dialog) return;
@@ -130,7 +135,7 @@ export function AppDialogProvider({ children }: { children: ReactNode }) {
         <div className="fixed inset-0 z-[140] flex items-center justify-center p-4">
           <button
             type="button"
-            aria-label="Close dialog"
+            aria-label={isZh ? "关闭弹窗" : "Close dialog"}
             className="absolute inset-0 bg-black/45 backdrop-blur-sm"
             onClick={() => closeDialog(dialog.kind === "confirm" ? false : true)}
           />
@@ -184,4 +189,3 @@ export function useAppDialog() {
   }
   return context;
 }
-

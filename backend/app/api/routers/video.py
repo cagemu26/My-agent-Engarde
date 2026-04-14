@@ -78,7 +78,7 @@ UPLOAD_STATUS_INITIATED = "initiated"
 UPLOAD_STATUS_UPLOADED = "uploaded"
 UPLOAD_STATUS_FAILED = "failed"
 CHAT_SESSION_TYPE_VIDEO = "video_analysis"
-ANALYSIS_COMPLETION_NOTICE = "分析已完成，可前往历史详情页面查看分析细节。"
+ANALYSIS_COMPLETION_NOTICE = "Analysis complete. You can open the history detail page to review the breakdown."
 DERIVED_OBJECT_CACHE_CONTROL = "public, max-age=31536000, immutable"
 
 
@@ -782,7 +782,7 @@ async def _run_report_job(job_id: str, preferred_chat_session_id: Optional[str] 
         if job is not None:
             job.status = REPORT_JOB_STATUS_FAILED
             job.completed_at = datetime.utcnow()
-            job.error_message = "分析失败，请重新分析。"
+            job.error_message = "Analysis failed. Please run it again."
             video_record = _get_video_record(db, job.video_id)
             if video_record:
                 video_record.report_status = REPORT_JOB_STATUS_FAILED
@@ -1516,7 +1516,7 @@ async def generate_pose_report(
         logger.exception("generate_pose_report_failed video_id=%s error=%s", video_id, str(e))
         raise HTTPException(
             status_code=500,
-            detail="分析失败，请重新分析。"
+            detail="Analysis failed. Please run it again."
         )
 
 

@@ -171,10 +171,33 @@ def _serialize_session(chat_session: ChatSession, message_count: int) -> ChatSes
 
 
 def _serialize_session_message(message: ChatMessageModel) -> ChatSessionMessageResponse:
+    raw_citations = _decode_message_json(message.citations_json)
+    citations = None
+    if isinstance(raw_citations, list):
+        parsed_citations = []
+        for item in raw_citations:
+            if not isinstance(item, dict):
+                continue
+            try:
+                parsed_citations.append(Citation(**item))
+            except Exception:
+                continue
+        citations = parsed_citations or None
+
+    raw_retrieval_meta = _decode_message_json(message.retrieval_meta_json)
+    retrieval_meta = None
+    if isinstance(raw_retrieval_meta, dict):
+        try:
+            retrieval_meta = RetrievalMeta(**raw_retrieval_meta)
+        except Exception:
+            retrieval_meta = None
+
     return ChatSessionMessageResponse(
         id=str(message.id),
         role=message.role,
         content=message.content,
+        citations=citations,
+        retrieval_meta=retrieval_meta,
         created_at=message.created_at,
     )
 
@@ -186,24 +209,6 @@ def _load_system_prompt() -> str:
         with open(system_prompt_file, "r", encoding="utf-8") as f:
             return f.read().strip()
     return _get_default_system_prompt()
-
-
-def _load_training_knowledge() -> str:
-    """Load training management knowledge from skills directory"""
-    knowledge_file = SKILLS_DIR / "knowledge" / "training.md"
-    if knowledge_file.exists():
-        with open(knowledge_file, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    return ""
-
-
-def _load_technique_tactics_knowledge() -> str:
-    """Load technique and tactics knowledge from skills directory"""
-    knowledge_file = SKILLS_DIR / "knowledge" / "technique_tactics.md"
-    if knowledge_file.exists():
-        with open(knowledge_file, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    return ""
 
 
 def _get_default_system_prompt() -> str:
@@ -233,10 +238,7 @@ class LLMService:
         self.base_url = settings.MINIMAX_BASE_URL
         self.model = (settings.MINIMAX_MODEL or "MiniMax-M2.7").strip() or "MiniMax-M2.7"
         self.max_completion_tokens = max(1, int(settings.LLM_MAX_COMPLETION_TOKENS))
-        # Load and cache all knowledge files at initialization
         self.system_prompt = _load_system_prompt()
-        self.training_knowledge = _load_training_knowledge()
-        self.technique_tactics_knowledge = _load_technique_tactics_knowledge()
         # Cache response templates
         self._response_templates = self._load_all_templates()
 
@@ -626,19 +628,16 @@ class LLMService:
         *,
         response_language: str = "auto",
     ) -> str:
-        """Build system prompt with optional context (uses cached knowledge)"""
+        """Build system prompt with optional runtime context."""
         prompt = self.system_prompt
 
-        # Add cached training knowledge
-        if self.training_knowledge:
-            prompt += f"\n\n## Training Management Knowledge\n\n{self.training_knowledge}"
-
-        # Add cached technique and tactics knowledge
-        if self.technique_tactics_knowledge:
-            prompt += f"\n\n## Technique and Tactics Knowledge\n\n{self.technique_tactics_knowledge}"
-
         if context:
-            prompt += f"\n\nCurrent context from video analysis and knowledge base:\n{context}"
+            prompt += (
+                "\n\n## Runtime Context\n"
+                "Use the following retrieved evidence and video context as the primary grounding source.\n"
+                "Do not fabricate facts beyond the provided context when the user asks for domain-specific claims.\n"
+                f"\n{context}"
+            )
 
         if response_language == "zh":
             prompt += (
@@ -700,6 +699,15 @@ llm_service = LLMService()
 
 def _build_sse_event(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+
+
+def _decode_message_json(raw_value: Optional[str]) -> Optional[Any]:
+    if not raw_value:
+        return None
+    try:
+        return json.loads(raw_value)
+    except json.JSONDecodeError:
+        return None
 
 
 async def _prepare_chat_turn(

@@ -6,8 +6,10 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { buildApiUrl } from "@/lib/api";
 import { BrandLogo } from "@/components/brand-logo";
+import { useLocale } from "@/lib/locale";
 
 export default function LoginPage() {
+  const { isZh } = useLocale();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -27,7 +29,7 @@ export default function LoginPage() {
       await login(email, password);
       router.push("/analyze");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Login failed");
+      setError(err instanceof Error ? err.message : isZh ? "登录失败" : "Login failed");
     } finally {
       setIsLoading(false);
     }
@@ -35,7 +37,7 @@ export default function LoginPage() {
 
   const handleResendVerification = async () => {
     if (!email) {
-      setError("Please enter your email first");
+      setError(isZh ? "请先输入邮箱地址" : "Please enter your email first");
       return;
     }
 
@@ -52,12 +54,12 @@ export default function LoginPage() {
       });
       const data = await response.json();
       if (!response.ok) {
-        throw new Error(data.detail || "Failed to resend verification email");
+        throw new Error(data.detail || (isZh ? "重新发送验证邮件失败" : "Failed to resend verification email"));
       }
       setError("");
-      setResendMessage(data.message || "Verification email sent");
+      setResendMessage(data.message || (isZh ? "验证邮件已发送" : "Verification email sent"));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to resend verification email");
+      setError(err instanceof Error ? err.message : isZh ? "重新发送验证邮件失败" : "Failed to resend verification email");
     } finally {
       setIsResending(false);
     }
@@ -85,8 +87,8 @@ export default function LoginPage() {
         {/* Login Card */}
         <div className="glass-card rounded-3xl p-8">
           <div className="text-center mb-8">
-            <h1 className="text-2xl font-bold mb-2">Welcome Back</h1>
-            <p className="text-muted-foreground">Sign in to your account</p>
+            <h1 className="text-2xl font-bold mb-2">{isZh ? "欢迎回来" : "Welcome Back"}</h1>
+            <p className="text-muted-foreground">{isZh ? "登录你的账号" : "Sign in to your account"}</p>
           </div>
 
           {error && (
@@ -102,7 +104,7 @@ export default function LoginPage() {
                 disabled={isResending}
                 className="w-full py-2 px-4 rounded-xl border border-red-500/40 text-red-600 text-sm font-medium hover:bg-red-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {isResending ? "Sending..." : "Resend verification email"}
+                {isResending ? (isZh ? "发送中..." : "Sending...") : isZh ? "重新发送验证邮件" : "Resend verification email"}
               </button>
             </div>
           )}
@@ -115,7 +117,7 @@ export default function LoginPage() {
           <form onSubmit={handleSubmit} className="space-y-5">
             <div>
               <label htmlFor="email" className="block text-sm font-medium mb-2">
-                Email
+                {isZh ? "邮箱" : "Email"}
               </label>
               <input
                 id="email"
@@ -130,7 +132,7 @@ export default function LoginPage() {
 
             <div>
               <label htmlFor="password" className="block text-sm font-medium mb-2">
-                Password
+                {isZh ? "密码" : "Password"}
               </label>
               <input
                 id="password"
@@ -139,13 +141,13 @@ export default function LoginPage() {
                 onChange={(e) => setPassword(e.target.value)}
                 required
                 className="w-full px-4 py-3 rounded-xl bg-muted/50 border border-border focus:border-red-500 focus:ring-2 focus:ring-red-500/20 outline-none transition-all"
-                placeholder="Enter your password"
+                placeholder={isZh ? "请输入密码" : "Enter your password"}
               />
             </div>
 
             <div className="text-right">
               <Link href="/reset-password" className="text-sm text-red-600 hover:underline">
-                Forgot password?
+                {isZh ? "忘记密码？" : "Forgot password?"}
               </Link>
             </div>
 
@@ -154,15 +156,15 @@ export default function LoginPage() {
               disabled={isLoading}
               className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-red-600 to-red-700 text-white font-semibold hover:shadow-lg hover:shadow-red-500/30 hover-lift transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {isLoading ? "Signing in..." : "Sign In"}
+              {isLoading ? (isZh ? "登录中..." : "Signing in...") : isZh ? "登录" : "Sign In"}
             </button>
           </form>
 
           <div className="mt-6 text-center">
             <p className="text-muted-foreground text-sm">
-              Don&apos;t have an account?{" "}
+              {isZh ? "还没有账号？" : "Don&apos;t have an account?"}{" "}
               <Link href="/register" className="text-red-600 font-medium hover:underline">
-                Register with invitation code
+                {isZh ? "使用邀请码注册" : "Register with invitation code"}
               </Link>
             </p>
           </div>
@@ -171,7 +173,7 @@ export default function LoginPage() {
         {/* Back to home */}
         <div className="mt-6 text-center">
           <Link href="/" className="text-muted-foreground hover:text-foreground text-sm">
-            Back to home
+            {isZh ? "返回首页" : "Back to home"}
           </Link>
         </div>
       </div>

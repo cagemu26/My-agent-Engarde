@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { buildApiUrl } from "@/lib/api";
 import { BrandLogo } from "@/components/brand-logo";
+import { useLocale } from "@/lib/locale";
 
 function AuthShell({ children }: { children: React.ReactNode }) {
   return (
@@ -33,6 +34,7 @@ function BrandHeader() {
 }
 
 function PasswordResetRequest() {
+  const { isZh } = useLocale();
   const [email, setEmail] = useState("");
   const [submitted, setSubmitted] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -53,7 +55,7 @@ function PasswordResetRequest() {
       });
       setSubmitted(true);
     } catch {
-      setError("An error occurred");
+      setError(isZh ? "发生错误，请稍后重试" : "An error occurred");
     } finally {
       setLoading(false);
     }
@@ -68,15 +70,17 @@ function PasswordResetRequest() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
             </svg>
           </div>
-          <h2 className="text-2xl font-bold mb-2">Check Your Email</h2>
+          <h2 className="text-2xl font-bold mb-2">{isZh ? "请查收邮箱" : "Check Your Email"}</h2>
           <p className="text-muted-foreground mb-6">
-            If an account with that email exists, we&apos;ve sent a password reset link.
+            {isZh
+              ? "如果该邮箱对应账号存在，我们已发送重置密码链接。"
+              : "If an account with that email exists, we&apos;ve sent a password reset link."}
           </p>
           <Link
             href="/login"
             className="inline-block px-6 py-3 rounded-xl bg-gradient-to-r from-red-600 to-red-700 text-white font-medium hover:shadow-lg hover:shadow-red-500/30 transition-all"
           >
-            Back to Login
+            {isZh ? "返回登录" : "Back to Login"}
           </Link>
         </div>
       </AuthShell>
@@ -88,8 +92,8 @@ function PasswordResetRequest() {
       <BrandHeader />
       <div className="glass-card rounded-3xl p-8">
         <div className="text-center mb-8">
-          <h1 className="text-2xl font-bold mb-2">Reset Password</h1>
-          <p className="text-muted-foreground">Enter your email to receive a reset link</p>
+          <h1 className="text-2xl font-bold mb-2">{isZh ? "重置密码" : "Reset Password"}</h1>
+          <p className="text-muted-foreground">{isZh ? "输入邮箱以接收重置链接" : "Enter your email to receive a reset link"}</p>
         </div>
 
         {error && (
@@ -101,7 +105,7 @@ function PasswordResetRequest() {
         <form onSubmit={handleRequest} className="space-y-5">
           <div>
             <label htmlFor="email" className="block text-sm font-medium mb-2">
-              Email
+              {isZh ? "邮箱" : "Email"}
             </label>
             <input
               id="email"
@@ -119,13 +123,13 @@ function PasswordResetRequest() {
             disabled={loading}
             className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-red-600 to-red-700 text-white font-semibold hover:shadow-lg hover:shadow-red-500/30 hover-lift transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {loading ? "Sending..." : "Send Reset Link"}
+            {loading ? (isZh ? "发送中..." : "Sending...") : isZh ? "发送重置链接" : "Send Reset Link"}
           </button>
         </form>
 
         <div className="mt-6 text-center">
           <Link href="/login" className="text-muted-foreground hover:text-foreground text-sm">
-            Back to Login
+            {isZh ? "返回登录" : "Back to Login"}
           </Link>
         </div>
       </div>
@@ -134,6 +138,7 @@ function PasswordResetRequest() {
 }
 
 function PasswordResetConfirm({ token }: { token: string }) {
+  const { isZh } = useLocale();
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState("");
@@ -145,12 +150,12 @@ function PasswordResetConfirm({ token }: { token: string }) {
     setError("");
 
     if (password !== confirmPassword) {
-      setError("Passwords do not match");
+      setError(isZh ? "两次输入的密码不一致" : "Passwords do not match");
       return;
     }
 
     if (password.length < 6) {
-      setError("Password must be at least 6 characters");
+      setError(isZh ? "密码至少需要 6 位" : "Password must be at least 6 characters");
       return;
     }
 
@@ -170,10 +175,10 @@ function PasswordResetConfirm({ token }: { token: string }) {
       if (response.ok && data.success) {
         setSuccess(true);
       } else {
-        setError(data.message || "Password reset failed");
+        setError(data.message || (isZh ? "密码重置失败" : "Password reset failed"));
       }
     } catch {
-      setError("An error occurred");
+      setError(isZh ? "发生错误，请稍后重试" : "An error occurred");
     } finally {
       setLoading(false);
     }
@@ -188,13 +193,15 @@ function PasswordResetConfirm({ token }: { token: string }) {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
             </svg>
           </div>
-          <h2 className="text-2xl font-bold mb-2">Password Reset!</h2>
-          <p className="text-muted-foreground mb-6">Your password has been reset successfully.</p>
+          <h2 className="text-2xl font-bold mb-2">{isZh ? "密码已重置！" : "Password Reset!"}</h2>
+          <p className="text-muted-foreground mb-6">
+            {isZh ? "你的密码已成功重置。" : "Your password has been reset successfully."}
+          </p>
           <Link
             href="/login"
             className="inline-block px-6 py-3 rounded-xl bg-gradient-to-r from-red-600 to-red-700 text-white font-medium hover:shadow-lg hover:shadow-red-500/30 transition-all"
           >
-            Go to Login
+            {isZh ? "前往登录" : "Go to Login"}
           </Link>
         </div>
       </AuthShell>
@@ -206,8 +213,8 @@ function PasswordResetConfirm({ token }: { token: string }) {
       <BrandHeader />
       <div className="glass-card rounded-3xl p-8">
         <div className="text-center mb-8">
-          <h1 className="text-2xl font-bold mb-2">New Password</h1>
-          <p className="text-muted-foreground">Enter your new password</p>
+          <h1 className="text-2xl font-bold mb-2">{isZh ? "设置新密码" : "New Password"}</h1>
+          <p className="text-muted-foreground">{isZh ? "输入你的新密码" : "Enter your new password"}</p>
         </div>
 
         {error && (
@@ -219,7 +226,7 @@ function PasswordResetConfirm({ token }: { token: string }) {
         <form onSubmit={handleSubmit} className="space-y-5">
           <div>
             <label htmlFor="password" className="block text-sm font-medium mb-2">
-              New Password
+              {isZh ? "新密码" : "New Password"}
             </label>
             <input
               id="password"
@@ -229,13 +236,13 @@ function PasswordResetConfirm({ token }: { token: string }) {
               required
               minLength={6}
               className="w-full px-4 py-3 rounded-xl bg-muted/50 border border-border focus:border-red-500 focus:ring-2 focus:ring-red-500/20 outline-none transition-all"
-              placeholder="Enter new password"
+              placeholder={isZh ? "请输入新密码" : "Enter new password"}
             />
           </div>
 
           <div>
             <label htmlFor="confirmPassword" className="block text-sm font-medium mb-2">
-              Confirm Password
+              {isZh ? "确认密码" : "Confirm Password"}
             </label>
             <input
               id="confirmPassword"
@@ -245,7 +252,7 @@ function PasswordResetConfirm({ token }: { token: string }) {
               required
               minLength={6}
               className="w-full px-4 py-3 rounded-xl bg-muted/50 border border-border focus:border-red-500 focus:ring-2 focus:ring-red-500/20 outline-none transition-all"
-              placeholder="Confirm new password"
+              placeholder={isZh ? "请再次输入新密码" : "Confirm new password"}
             />
           </div>
 
@@ -254,13 +261,13 @@ function PasswordResetConfirm({ token }: { token: string }) {
             disabled={loading}
             className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-red-600 to-red-700 text-white font-semibold hover:shadow-lg hover:shadow-red-500/30 hover-lift transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {loading ? "Resetting..." : "Reset Password"}
+            {loading ? (isZh ? "重置中..." : "Resetting...") : isZh ? "重置密码" : "Reset Password"}
           </button>
         </form>
 
         <div className="mt-6 text-center">
           <Link href="/login" className="text-muted-foreground hover:text-foreground text-sm">
-            Back to Login
+            {isZh ? "返回登录" : "Back to Login"}
           </Link>
         </div>
       </div>

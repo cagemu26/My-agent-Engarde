@@ -82,6 +82,8 @@ class ChatSessionMessageResponse(BaseModel):
     id: str
     role: str
     content: str
+    citations: Optional[list[Citation]] = None
+    retrieval_meta: Optional[RetrievalMeta] = None
     created_at: datetime
 
 

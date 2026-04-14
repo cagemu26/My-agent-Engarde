@@ -4,6 +4,7 @@ import { createContext, useCallback, useContext, useState, useEffect, ReactNode,
 import { useRouter } from "next/navigation";
 import { AUTH_EXPIRED_EVENT, buildApiUrl } from "@/lib/api";
 import { useAppDialog } from "@/components/app-dialog-provider";
+import { useLocale } from "@/lib/locale";
 
 export interface AuthUser {
   id: string;
@@ -32,6 +33,7 @@ const AUTH_FREE_PATH_PREFIXES = ["/login", "/register", "/verify-email", "/reset
 export function AuthProvider({ children }: { children: ReactNode }) {
   const router = useRouter();
   const { alert } = useAppDialog();
+  const { isZh } = useLocale();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -79,9 +81,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               ? (event.detail as { message?: string })
               : null;
           await alert({
-            title: "登录已失效",
-            description: detail?.message || "当前登录状态已过期，请重新登录后继续操作。",
-            confirmText: "去登录",
+            title: isZh ? "登录已失效" : "Session expired",
+            description:
+              detail?.message ||
+              (isZh
+                ? "当前登录状态已过期，请重新登录后继续操作。"
+                : "Your login session has expired. Please sign in again to continue."),
+            confirmText: isZh ? "去登录" : "Go to login",
           });
 
           const nextPath = `${pathname}${window.location.search || ""}`;
@@ -97,7 +103,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => {
       window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
     };
-  }, [alert, clearAuthState, router]);
+  }, [alert, clearAuthState, isZh, router]);
 
   const login = async (email: string, password: string) => {
     const response = await fetch(buildApiUrl("/api/auth/login"), {

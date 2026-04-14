@@ -15,6 +15,7 @@ import {
 } from "@/lib/chat-session";
 import { TopNav } from "@/components/top-nav";
 import { useAppDialog } from "@/components/app-dialog-provider";
+import { useLocale } from "@/lib/locale";
 
 const HISTORY_NAV_LINKS = [
   { href: "/analyze", label: "Analyze" },
@@ -63,30 +64,33 @@ const SESSION_ORDER: SessionType[] = [
   SESSION_TYPE_CHAT,
 ];
 
-const getWeaponLabel = (weapon: string) => {
+const getWeaponLabel = (weapon: string, isZh: boolean) => {
   const labels: Record<string, string> = {
-    foil: "Foil",
-    epee: "Epee",
-    sabre: "Sabre",
+    foil: isZh ? "花剑" : "Foil",
+    epee: isZh ? "重剑" : "Epee",
+    sabre: isZh ? "佩剑" : "Sabre",
   };
-  return labels[weapon?.toLowerCase()] || weapon || "Unknown";
+  return labels[weapon?.toLowerCase()] || weapon || (isZh ? "未知" : "Unknown");
 };
 
-const formatRelativeTime = (dateString?: string | null) => {
-  if (!dateString) return "Unknown";
+const formatRelativeTime = (dateString: string | undefined | null, isZh: boolean) => {
+  if (!dateString) return isZh ? "未知" : "Unknown";
   const date = new Date(dateString);
-  if (Number.isNaN(date.getTime())) return "Unknown";
+  if (Number.isNaN(date.getTime())) return isZh ? "未知" : "Unknown";
 
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
   const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
   const diffDays = Math.floor(diffHours / 24);
 
-  if (diffHours < 1) return "Just now";
-  if (diffHours < 24) return `${diffHours} hour${diffHours > 1 ? "s" : ""} ago`;
-  if (diffDays === 1) return "Yesterday";
-  if (diffDays < 7) return `${diffDays} days ago`;
-  if (diffDays < 30) return `${Math.floor(diffDays / 7)} week${Math.floor(diffDays / 7) > 1 ? "s" : ""} ago`;
+  if (diffHours < 1) return isZh ? "刚刚" : "Just now";
+  if (diffHours < 24) return isZh ? `${diffHours}小时前` : `${diffHours} hour${diffHours > 1 ? "s" : ""} ago`;
+  if (diffDays === 1) return isZh ? "昨天" : "Yesterday";
+  if (diffDays < 7) return isZh ? `${diffDays}天前` : `${diffDays} days ago`;
+  if (diffDays < 30) {
+    const weeks = Math.floor(diffDays / 7);
+    return isZh ? `${weeks}周前` : `${weeks} week${weeks > 1 ? "s" : ""} ago`;
+  }
   return date.toLocaleDateString();
 };
 
@@ -108,12 +112,21 @@ const parseApiError = async (response: Response, fallback: string): Promise<stri
 export default function History() {
   const router = useRouter();
   const { confirm } = useAppDialog();
+  const { isZh } = useLocale();
   const [videos, setVideos] = useState<VideoMetadata[]>([]);
   const [sessions, setSessions] = useState<ChatSessionRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [creatingSession, setCreatingSession] = useState(false);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const getSessionTypeLabel = useCallback(
+    (type: SessionType) => {
+      if (type === SESSION_TYPE_VIDEO) return isZh ? "视频分析" : "Video Analysis";
+      if (type === SESSION_TYPE_TRAINING) return isZh ? "训练分析" : "Training Analysis";
+      return isZh ? "聊天问答" : "Chat Q&A";
+    },
+    [isZh],
+  );
 
   const fetchHistoryData = useCallback(async () => {
     try {
@@ -123,10 +136,10 @@ export default function History() {
         authFetch("/chat/sessions?limit=100"),
       ]);
       if (!videosResponse.ok) {
-        throw new Error("Failed to fetch videos");
+        throw new Error(isZh ? "获取视频失败" : "Failed to fetch videos");
       }
       if (!sessionsResponse.ok) {
-        throw new Error("Failed to fetch chat sessions");
+        throw new Error(isZh ? "获取会话失败" : "Failed to fetch chat sessions");
       }
 
       const videosData = await videosResponse.json();
@@ -141,11 +154,11 @@ export default function History() {
       setSessions((sessionsData.sessions || []) as ChatSessionRecord[]);
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load history data");
+      setError(err instanceof Error ? err.message : isZh ? "加载历史记录失败" : "Failed to load history data");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [isZh]);
 
   useEffect(() => {
     fetchHistoryData();
@@ -186,23 +199,23 @@ export default function History() {
         body: JSON.stringify({
           session_type: SESSION_TYPE_CHAT,
           force_new: true,
-          title: `Chat ${new Date().toLocaleDateString()}`,
+          title: `${isZh ? "聊天" : "Chat"} ${new Date().toLocaleDateString()}`,
         }),
       });
       if (!response.ok) {
-        throw new Error("Failed to create session");
+        throw new Error(isZh ? "创建会话失败" : "Failed to create session");
       }
       const data = (await response.json()) as ChatSessionRecord;
       if (!data.id) {
-        throw new Error("Invalid session response");
+        throw new Error(isZh ? "会话响应无效" : "Invalid session response");
       }
       router.push(`/analyze?chat_session=${encodeURIComponent(data.id)}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create new session");
+      setError(err instanceof Error ? err.message : isZh ? "创建新会话失败" : "Failed to create new session");
     } finally {
       setCreatingSession(false);
     }
-  }, [router]);
+  }, [isZh, router]);
 
   const handleDeleteSession = useCallback(
     async (session: ChatSessionRecord) => {
@@ -212,12 +225,22 @@ export default function History() {
       const isVideoSession = normalizedType === SESSION_TYPE_VIDEO && Boolean(session.video_id);
 
       const confirmed = await confirm({
-        title: isVideoSession ? "Delete this video session?" : "Delete this session?",
+        title: isVideoSession
+          ? isZh
+            ? "删除该视频会话？"
+            : "Delete this video session?"
+          : isZh
+            ? "删除该会话？"
+            : "Delete this session?",
         description: isVideoSession
-          ? "This will permanently delete all related video-analysis sessions, messages, video assets, and reports for this video. This action cannot be undone."
-          : "This will permanently delete this session and all messages. This action cannot be undone.",
-        confirmText: "Delete",
-        cancelText: "Cancel",
+          ? isZh
+            ? "将永久删除该视频相关的所有分析会话、消息、视频文件和报告，且无法恢复。"
+            : "This will permanently delete all related video-analysis sessions, messages, video assets, and reports for this video. This action cannot be undone."
+          : isZh
+            ? "将永久删除该会话及全部消息，且无法恢复。"
+            : "This will permanently delete this session and all messages. This action cannot be undone.",
+        confirmText: isZh ? "删除" : "Delete",
+        cancelText: isZh ? "取消" : "Cancel",
         danger: true,
       });
       if (!confirmed) {
@@ -230,7 +253,7 @@ export default function History() {
           method: "DELETE",
         });
         if (!response.ok) {
-          throw new Error(await parseApiError(response, "Failed to delete session"));
+          throw new Error(await parseApiError(response, isZh ? "删除会话失败" : "Failed to delete session"));
         }
 
         const deleted = (await response.json()) as ChatSessionDeleteResponse;
@@ -257,12 +280,12 @@ export default function History() {
         }
         setError(null);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to delete session");
+        setError(err instanceof Error ? err.message : isZh ? "删除会话失败" : "Failed to delete session");
       } finally {
         setDeletingSessionId(null);
       }
     },
-    [confirm, deletingSessionId],
+    [confirm, deletingSessionId, isZh],
   );
 
   return (
@@ -273,14 +296,14 @@ export default function History() {
         <div className="mx-auto max-w-6xl px-6">
           <div className="mb-10 flex items-center justify-between gap-4">
             <div>
-              <h1 className="text-4xl font-bold">Session History</h1>
+              <h1 className="text-4xl font-bold">{isZh ? "会话历史" : "Session History"}</h1>
               <p className="mt-2 text-muted-foreground">
-                Multi-thread AI sessions grouped by source type.
+                {isZh ? "按来源类型分组的 AI 多线程会话。" : "Multi-thread AI sessions grouped by source type."}
               </p>
             </div>
             <div className="flex items-center gap-3">
               <div className="text-right">
-                <p className="text-sm text-muted-foreground">Threads</p>
+                <p className="text-sm text-muted-foreground">{isZh ? "会话数" : "Threads"}</p>
                 <p className="text-4xl font-bold text-foreground">{totalSessions}</p>
               </div>
               <button
@@ -289,20 +312,22 @@ export default function History() {
                 disabled={creatingSession}
                 className="rounded-xl bg-red-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {creatingSession ? "Creating..." : "New Session"}
+                {creatingSession ? (isZh ? "创建中..." : "Creating...") : isZh ? "新建会话" : "New Session"}
               </button>
             </div>
           </div>
 
           <div className="mb-8 rounded-2xl border border-border bg-card p-4 text-sm text-foreground/85">
-            History is grouped into three sources: Video Analysis, Training Analysis, and Chat Q&A.
+            {isZh
+              ? "历史记录分为三类：视频分析、训练分析和聊天问答。"
+              : "History is grouped into three sources: Video Analysis, Training Analysis, and Chat Q&A."}
           </div>
 
           {loading && (
             <div className="flex items-center justify-center py-20">
               <div className="flex flex-col items-center gap-4">
                 <div className="h-12 w-12 animate-spin rounded-full border-4 border-red-500 border-t-transparent" />
-                <p className="text-muted-foreground">Loading history...</p>
+                <p className="text-muted-foreground">{isZh ? "加载历史记录中..." : "Loading history..."}</p>
               </div>
             </div>
           )}
@@ -315,7 +340,7 @@ export default function History() {
                 onClick={fetchHistoryData}
                 className="mt-3 text-sm font-medium text-red-600 hover:underline"
               >
-                Try again
+                {isZh ? "重试" : "Try again"}
               </button>
             </div>
           )}
@@ -332,9 +357,11 @@ export default function History() {
                   />
                 </svg>
               </div>
-              <h3 className="text-xl font-bold">No sessions yet</h3>
+              <h3 className="text-xl font-bold">{isZh ? "暂无会话" : "No sessions yet"}</h3>
               <p className="mx-auto mt-2 max-w-sm text-muted-foreground">
-                Start a new chat thread or analyze a training/video context to populate history.
+                {isZh
+                  ? "新建聊天会话，或先完成训练/视频分析后在这里查看历史。"
+                  : "Start a new chat thread or analyze a training/video context to populate history."}
               </p>
               <div className="mt-6 flex items-center justify-center gap-3">
                 <button
@@ -342,13 +369,13 @@ export default function History() {
                   onClick={handleCreateNewSession}
                   className="rounded-xl bg-red-600 px-6 py-3 font-medium text-white transition-colors hover:bg-red-700"
                 >
-                  New Chat Session
+                  {isZh ? "新建聊天会话" : "New Chat Session"}
                 </button>
                 <Link
                   href="/analyze"
                   className="rounded-xl border border-border px-6 py-3 font-medium transition-colors hover:border-red-300"
                 >
-                  Open Analyze
+                  {isZh ? "打开分析页" : "Open Analyze"}
                 </Link>
               </div>
             </div>
@@ -361,38 +388,49 @@ export default function History() {
                 if (!items.length) return null;
 
                 const meta = SESSION_META[type];
+                const typeLabel = getSessionTypeLabel(type);
                 return (
                   <section key={type}>
                     <div className="mb-3 flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <span className={`h-2.5 w-2.5 rounded-full ${meta.dotClass}`} />
-                        <h2 className="text-lg font-semibold">{meta.label}</h2>
+                        <h2 className="text-lg font-semibold">{typeLabel}</h2>
                       </div>
-                      <span className="text-xs text-muted-foreground">{items.length} sessions</span>
+                      <span className="text-xs text-muted-foreground">
+                        {isZh ? `${items.length} 个会话` : `${items.length} sessions`}
+                      </span>
                     </div>
 
                     <div className="space-y-3">
                       {items.map((session) => {
                         const linkedVideo = session.video_id ? videoById.get(session.video_id) : null;
+                        const normalizedType = normalizeSessionType(session.session_type);
+                        const badgeLabel = getSessionTypeLabel(normalizedType);
                         const title =
                           linkedVideo?.title ||
                           session.title ||
                           (type === SESSION_TYPE_VIDEO
-                            ? "Video Analysis Session"
+                            ? isZh
+                              ? "视频分析会话"
+                              : "Video Analysis Session"
                             : type === SESSION_TYPE_TRAINING
-                              ? "Training Analysis Session"
-                              : "Chat Session");
+                              ? isZh
+                                ? "训练分析会话"
+                                : "Training Analysis Session"
+                              : isZh
+                                ? "聊天会话"
+                                : "Chat Session");
 
                         const summary =
                           type === SESSION_TYPE_VIDEO
                             ? [
-                                linkedVideo?.weapon ? getWeaponLabel(linkedVideo.weapon) : "",
+                                linkedVideo?.weapon ? getWeaponLabel(linkedVideo.weapon, isZh) : "",
                                 linkedVideo?.tournament || "",
                                 linkedVideo?.score || "",
                               ]
                                 .filter(Boolean)
-                                .join(" • ") || "Video context session"
-                            : session.context_summary?.replace(/\s+/g, " ").trim() || "No summary yet.";
+                                .join(" • ") || (isZh ? "视频上下文会话" : "Video context session")
+                            : session.context_summary?.replace(/\s+/g, " ").trim() || (isZh ? "暂无摘要" : "No summary yet.");
 
                         return (
                           <div
@@ -403,16 +441,17 @@ export default function History() {
                               <div className="min-w-0">
                                 <div className="flex items-center gap-2">
                                   <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${meta.badgeClass}`}>
-                                    {meta.label}
+                                    {badgeLabel}
                                   </span>
                                   <span className="text-xs text-muted-foreground">
-                                    Updated {formatRelativeTime(session.last_message_at || session.updated_at)}
+                                    {isZh ? "更新于 " : "Updated "}
+                                    {formatRelativeTime(session.last_message_at || session.updated_at, isZh)}
                                   </span>
                                 </div>
                                 <h3 className="mt-2 truncate text-base font-semibold text-foreground">{title}</h3>
                                 <p className="mt-1 truncate text-sm text-muted-foreground">{summary}</p>
                                 <p className="mt-1 text-xs text-muted-foreground">
-                                  {session.message_count} messages
+                                  {isZh ? `${session.message_count} 条消息` : `${session.message_count} messages`}
                                 </p>
                               </div>
 
@@ -421,14 +460,14 @@ export default function History() {
                                   href={`/analyze?chat_session=${encodeURIComponent(session.id)}`}
                                   className="rounded-xl bg-red-600 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-700"
                                 >
-                                  Continue Chat
+                                  {isZh ? "继续聊天" : "Continue Chat"}
                                 </Link>
                                 {session.video_id && (
                                   <Link
                                     href={`/history/${session.video_id}`}
                                     className="rounded-xl border border-border px-3 py-2 text-sm font-semibold transition-colors hover:border-red-300"
                                   >
-                                    Open Video
+                                    {isZh ? "查看视频" : "Open Video"}
                                   </Link>
                                 )}
                                 <button
@@ -437,7 +476,7 @@ export default function History() {
                                   disabled={deletingSessionId === session.id}
                                   className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-600 transition-colors hover:border-red-300 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-800 dark:bg-red-900/30 dark:text-red-300"
                                 >
-                                  {deletingSessionId === session.id ? "Deleting..." : "Delete"}
+                                  {deletingSessionId === session.id ? (isZh ? "删除中..." : "Deleting...") : isZh ? "删除" : "Delete"}
                                 </button>
                               </div>
                             </div>

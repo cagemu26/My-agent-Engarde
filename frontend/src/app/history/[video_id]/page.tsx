@@ -27,6 +27,7 @@ import {
 import { waitForPoseAnalysisJob } from "@/lib/pose-analysis-job";
 import { ReportMarkdown } from "@/components/report-markdown";
 import { TopNav } from "@/components/top-nav";
+import { useLocale } from "@/lib/locale";
 
 const HISTORY_DETAIL_NAV_LINKS = [
   { href: "/analyze", label: "Analyze" },
@@ -491,6 +492,11 @@ const getMetricStatusLabel = (
 export default function VideoDetail() {
   const params = useParams();
   const searchParams = useSearchParams();
+  const { isZh } = useLocale();
+  const t = useCallback(
+    (zh: string, en: string) => (isZh ? zh : en),
+    [isZh],
+  );
   const videoId = params.video_id as string;
 
   const [video, setVideo] = useState<VideoMetadata | null>(null);
@@ -940,11 +946,11 @@ export default function VideoDetail() {
 
   const getWeaponLabel = (weapon: string) => {
     const labels: Record<string, string> = {
-      foil: "Foil",
-      epee: "Epee",
-      sabre: "Sabre"
+      foil: isZh ? "花剑" : "Foil",
+      epee: isZh ? "重剑" : "Epee",
+      sabre: isZh ? "佩剑" : "Sabre",
     };
-    return labels[weapon?.toLowerCase()] || weapon || "Unknown";
+    return labels[weapon?.toLowerCase()] || weapon || (isZh ? "未知" : "Unknown");
   };
 
   const getWeaponColor = (weapon: string) => {
@@ -957,9 +963,9 @@ export default function VideoDetail() {
   };
 
   const formatDate = (dateString: string) => {
-    if (!dateString) return "Unknown";
+    if (!dateString) return isZh ? "未知" : "Unknown";
     const date = new Date(dateString);
-    return date.toLocaleDateString("en-US", {
+    return date.toLocaleDateString(isZh ? "zh-CN" : "en-US", {
       year: "numeric",
       month: "long",
       day: "numeric"
@@ -979,6 +985,110 @@ export default function VideoDetail() {
   const poseFps = poseData?.video_properties?.fps || 0;
   const inferredDominantSide = useMemo(() => inferDominantSide(poseFrames), [poseFrames]);
   const activeDominantSide = dominantSideMode === "auto" ? inferredDominantSide : dominantSideMode;
+  const localizedMetricConfig = useMemo<Record<MetricKey, MetricConfig>>(
+    () =>
+      isZh
+        ? {
+            trackingQuality: {
+              label: "追踪质量",
+              hint: "33 个关键点的平均可见性。",
+              lowLabel: "低",
+              midLabel: "稳定",
+              highLabel: "高",
+            },
+            stanceWidthIndex: {
+              label: "站姿宽度指数",
+              hint: "踝间距/肩宽 的归一化结果。",
+              lowLabel: "偏窄",
+              midLabel: "均衡",
+              highLabel: "偏宽",
+            },
+            weaponArmExtension: {
+              label: "持剑手臂伸展",
+              hint: "持剑侧腕到肩距离（归一化）。",
+              lowLabel: "较短",
+              midLabel: "准备",
+              highLabel: "较长",
+            },
+            guardHeight: {
+              label: "护手高度",
+              hint: "持剑侧手部相对肩中线高度。",
+              lowLabel: "低位",
+              midLabel: "中位",
+              highLabel: "高位",
+            },
+            handSpeed: {
+              label: "手部速度",
+              hint: "持剑侧手腕归一化速度（每秒）。",
+              lowLabel: "慢",
+              midLabel: "可控",
+              highLabel: "快",
+            },
+            leadKneeAngle: {
+              label: "前腿膝角",
+              hint: "持剑侧髋-膝-踝夹角。",
+              lowLabel: "深屈",
+              midLabel: "蓄力",
+              highLabel: "伸展",
+            },
+            rearKneeAngle: {
+              label: "后腿膝角",
+              hint: "后侧髋-膝-踝夹角。",
+              lowLabel: "深屈",
+              midLabel: "蓄力",
+              highLabel: "伸展",
+            },
+            weaponArmElbowAngle: {
+              label: "持剑臂肘角",
+              hint: "持剑侧肩-肘-腕夹角。",
+              lowLabel: "弯曲",
+              midLabel: "蓄力",
+              highLabel: "伸展",
+            },
+            torsoLeanAngle: {
+              label: "躯干前倾角",
+              hint: "肩髋连线相对竖直方向的倾角。",
+              lowLabel: "较直立",
+              midLabel: "中等前倾",
+              highLabel: "较深前倾",
+            },
+          }
+        : METRIC_CONFIG,
+    [isZh],
+  );
+  const localizeMetricStatus = useCallback(
+    (status: string) => {
+      if (!isZh) return status;
+      const map: Record<string, string> = {
+        "N/A": "无数据",
+        "Low confidence": "低置信度",
+        Low: "低",
+        Stable: "稳定",
+        High: "高",
+        Narrow: "偏窄",
+        Balanced: "均衡",
+        Wide: "偏宽",
+        Short: "较短",
+        Ready: "准备",
+        Long: "较长",
+        "Low Guard": "低位",
+        Neutral: "中位",
+        "High Guard": "高位",
+        Slow: "慢",
+        Controlled: "可控",
+        Fast: "快",
+        "Deep Bend": "深屈",
+        Loaded: "蓄力",
+        Extended: "伸展",
+        Bent: "弯曲",
+        Upright: "较直立",
+        "Neutral Lean": "中等前倾",
+        "Deep Lean": "较深前倾",
+      };
+      return map[status] || status;
+    },
+    [isZh],
+  );
 
   const currentPoseMatch = useMemo(() => {
     if (!poseFrames.length) {
@@ -1077,10 +1187,10 @@ export default function VideoDetail() {
     if (currentPoseFrameArrayIndex < 0 || currentPoseFrameArrayIndex >= metricTimeline.length) {
       return METRIC_KEYS.map((key) => ({
         key,
-        ...METRIC_CONFIG[key],
+        ...localizedMetricConfig[key],
         value: null as number | null,
-        formattedValue: "N/A",
-        status: "N/A",
+        formattedValue: isZh ? "无数据" : "N/A",
+        status: isZh ? "无数据" : "N/A",
         lowConfidence: false,
       }));
     }
@@ -1090,19 +1200,19 @@ export default function VideoDetail() {
       const metric = sample[key];
       const formattedValue = formatMetricValue(key, metric.value);
       const status = metric.lowConfidence
-        ? "Low confidence"
+        ? localizeMetricStatus("Low confidence")
         : getMetricStatusLabel(key, metric.value, metricBaselines[key]);
 
       return {
         key,
-        ...METRIC_CONFIG[key],
+        ...localizedMetricConfig[key],
         value: metric.value,
         formattedValue,
-        status,
+        status: localizeMetricStatus(status),
         lowConfidence: metric.lowConfidence,
       };
     });
-  }, [currentPoseFrameArrayIndex, metricBaselines, metricTimeline]);
+  }, [currentPoseFrameArrayIndex, isZh, localizeMetricStatus, localizedMetricConfig, metricBaselines, metricTimeline]);
 
   const currentConfidence = useMemo(() => {
     if (!currentPoseFrame) return null;
@@ -1126,7 +1236,7 @@ export default function VideoDetail() {
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="flex flex-col items-center gap-3">
           <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin"></div>
-          <p className="text-muted-foreground text-sm">Loading video...</p>
+          <p className="text-muted-foreground text-sm">{t("加载视频中...", "Loading video...")}</p>
         </div>
       </div>
     );
@@ -1139,9 +1249,9 @@ export default function VideoDetail() {
         <main className="pt-32 pb-16">
           <div className="max-w-4xl mx-auto px-6">
             <div className="mb-6 p-4 rounded-xl bg-red-500/10 border border-red-500/20">
-              <p className="text-red-500 text-sm">{error || "Video not found"}</p>
+              <p className="text-red-500 text-sm">{error || t("未找到视频", "Video not found")}</p>
               <Link href="/history" className="mt-2 text-sm text-primary hover:underline inline-block">
-                Back to History
+                {t("返回历史页", "Back to History")}
               </Link>
             </div>
           </div>
@@ -1164,14 +1274,14 @@ export default function VideoDetail() {
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
             </svg>
-            Back to History
+            {t("返回历史页", "Back to History")}
           </Link>
 
           {/* Video Header */}
           <div className="mb-8">
             <div className="flex items-start justify-between mb-4">
               <div>
-                <h1 className="text-3xl font-bold mb-2">{video.title || "Untitled Video"}</h1>
+                <h1 className="text-3xl font-bold mb-2">{video.title || t("未命名视频", "Untitled Video")}</h1>
                 <div className="flex items-center gap-3">
                   <span
                     className="px-3 py-1 rounded-full text-sm font-medium"
@@ -1195,7 +1305,11 @@ export default function VideoDetail() {
                     ? "bg-red-500/10 text-red-500"
                     : "bg-yellow-500/10 text-yellow-500"
                 }`}>
-                  {video.match_result === "win" ? "Win" : video.match_result === "loss" ? "Loss" : "Draw"}
+                  {video.match_result === "win"
+                    ? t("胜", "Win")
+                    : video.match_result === "loss"
+                      ? t("负", "Loss")
+                      : t("平", "Draw")}
                 </span>
               )}
             </div>
@@ -1204,19 +1318,19 @@ export default function VideoDetail() {
             <div className="p-4 rounded-xl bg-card border border-border">
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div>
-                  <p className="text-sm text-muted-foreground">Athlete</p>
-                  <p className="font-medium">{video.athlete || "Unknown"}</p>
+                  <p className="text-sm text-muted-foreground">{t("运动员", "Athlete")}</p>
+                  <p className="font-medium">{video.athlete || t("未知", "Unknown")}</p>
                 </div>
                 <div>
-                  <p className="text-sm text-muted-foreground">Opponent</p>
-                  <p className="font-medium">{video.opponent || "Unknown"}</p>
+                  <p className="text-sm text-muted-foreground">{t("对手", "Opponent")}</p>
+                  <p className="font-medium">{video.opponent || t("未知", "Unknown")}</p>
                 </div>
                 <div>
-                  <p className="text-sm text-muted-foreground">Score</p>
+                  <p className="text-sm text-muted-foreground">{t("比分", "Score")}</p>
                   <p className="font-medium">{video.score || "N/A"}</p>
                 </div>
                 <div>
-                  <p className="text-sm text-muted-foreground">Uploaded</p>
+                  <p className="text-sm text-muted-foreground">{t("上传时间", "Uploaded")}</p>
                   <p className="font-medium">{formatDate(video.upload_time)}</p>
                 </div>
               </div>
@@ -1226,9 +1340,9 @@ export default function VideoDetail() {
           <div id="replay" className="mb-6">
             <div className="mb-4 flex flex-wrap items-start justify-between gap-4">
               <div className="max-w-2xl">
-                <h2 className="text-xl font-semibold">Replay</h2>
+                <h2 className="text-xl font-semibold">{t("回放", "Replay")}</h2>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  Review the original clip or switch to the skeleton overlay replay.
+                  {t("可查看原始视频，或切换到骨架叠加回放。", "Review the original clip or switch to the skeleton overlay replay.")}
                 </p>
               </div>
               <div className="inline-flex rounded-xl border border-border bg-card p-1 shadow-sm">
@@ -1239,7 +1353,7 @@ export default function VideoDetail() {
                     replayMode === "original" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  Original
+                  {t("原始", "Original")}
                 </button>
                 <button
                   type="button"
@@ -1248,7 +1362,7 @@ export default function VideoDetail() {
                     replayMode === "skeleton" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  Skeleton
+                  {t("骨架", "Skeleton")}
                 </button>
               </div>
             </div>
@@ -1259,7 +1373,7 @@ export default function VideoDetail() {
                   <div className="flex h-full items-center justify-center">
                     <div className="flex flex-col items-center gap-3">
                       <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent"></div>
-                      <p className="text-sm text-muted-foreground">Preparing skeleton replay...</p>
+                      <p className="text-sm text-muted-foreground">{t("准备骨架回放中...", "Preparing skeleton replay...")}</p>
                     </div>
                   </div>
                 ) : replayMode === "skeleton" && skeletonError ? (
@@ -1270,7 +1384,7 @@ export default function VideoDetail() {
                       onClick={() => void ensureSkeletonReplay()}
                       className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
                     >
-                      Retry Skeleton Replay
+                      {t("重试骨架回放", "Retry Skeleton Replay")}
                     </button>
                   </div>
                 ) : (
@@ -1295,12 +1409,12 @@ export default function VideoDetail() {
                   <div className="flex flex-col items-center gap-3 text-center">
                     <div className="space-y-1">
                       <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-muted-foreground">
-                        Replay Focus
+                        {t("回放焦点", "Replay Focus")}
                       </p>
                       <p className="text-sm text-muted-foreground">
                         {hasDualAthletes
-                          ? "Choose which athlete drives the live data and AI report below."
-                          : "Live data and AI report follow the detected athlete."}
+                          ? t("选择由哪位运动员驱动下方实时数据和 AI 报告。", "Choose which athlete drives the live data and AI report below.")
+                          : t("实时数据和 AI 报告将跟随检测到的运动员。", "Live data and AI report follow the detected athlete.")}
                       </p>
                     </div>
 
@@ -1328,7 +1442,8 @@ export default function VideoDetail() {
                     )}
 
                     <p className="text-sm font-medium text-foreground">
-                      Current focus: <span className="text-primary">{selectedAthleteLabel}</span>
+                      {t("当前焦点：", "Current focus: ")}
+                      <span className="text-primary">{selectedAthleteLabel}</span>
                     </p>
                   </div>
                 </div>
@@ -1341,49 +1456,52 @@ export default function VideoDetail() {
             <div className="mb-6">
               <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <h2 className="text-xl font-semibold">Pose Analysis</h2>
+                  <h2 className="text-xl font-semibold">{t("姿态分析", "Pose Analysis")}</h2>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    Live data below follows the replay focus: {selectedAthleteLabel}.
+                    {t("下方实时数据跟随当前回放焦点：", "Live data below follows the replay focus: ")}
+                    {selectedAthleteLabel}.
                   </p>
                 </div>
-                <p className="text-xs text-muted-foreground">AI analysis is for reference only.</p>
+                <p className="text-xs text-muted-foreground">{t("AI 分析数据仅供参考。", "AI analysis is for reference only.")}</p>
               </div>
               <div className="rounded-xl border border-border bg-card p-4">
                 <div className="mb-4 grid grid-cols-2 gap-4 md:grid-cols-6">
                   <div>
-                    <p className="text-sm text-muted-foreground">Playback Time</p>
+                    <p className="text-sm text-muted-foreground">{t("播放时间", "Playback Time")}</p>
                     <p className="text-2xl font-bold">{playbackTimeSec.toFixed(2)}s</p>
                   </div>
                   <div>
-                    <p className="text-sm text-muted-foreground">Estimated Frame</p>
+                    <p className="text-sm text-muted-foreground">{t("估算帧", "Estimated Frame")}</p>
                     <p className="text-2xl font-bold">{playbackFrameIndex}</p>
                   </div>
                   <div>
-                    <p className="text-sm text-muted-foreground">Matched Pose Frame</p>
+                    <p className="text-sm text-muted-foreground">{t("匹配姿态帧", "Matched Pose Frame")}</p>
                     <p className="text-2xl font-bold">{currentPoseFrame?.frame_index ?? "N/A"}</p>
                   </div>
                   <div>
-                    <p className="text-sm text-muted-foreground">Detection Confidence</p>
+                    <p className="text-sm text-muted-foreground">{t("检测置信度", "Detection Confidence")}</p>
                     <p className="text-2xl font-bold">
                       {currentConfidence !== null ? `${(currentConfidence * 100).toFixed(0)}%` : "N/A"}
                     </p>
                   </div>
                   <div>
-                    <p className="text-sm text-muted-foreground">Pose FPS</p>
+                    <p className="text-sm text-muted-foreground">{t("姿态 FPS", "Pose FPS")}</p>
                     <p className="text-2xl font-bold">{poseData.video_properties?.fps || "N/A"}</p>
                   </div>
                   <div>
-                    <p className="text-sm text-muted-foreground">Selected Athlete</p>
+                    <p className="text-sm text-muted-foreground">{t("已选运动员", "Selected Athlete")}</p>
                     <p className="text-2xl font-bold">{getAthleteSlotShortLabel(selectedAthleteSlot)}</p>
                     <p className="text-xs text-muted-foreground">
-                      {hasDualAthletes ? "Controlled from the replay focus selector" : "Single detected athlete"}
+                      {hasDualAthletes
+                        ? t("由回放焦点选择器控制", "Controlled from the replay focus selector")
+                        : t("仅检测到单个运动员", "Single detected athlete")}
                     </p>
                   </div>
                   <div>
-                    <p className="text-sm text-muted-foreground">Weapon Side</p>
-                    <p className="text-2xl font-bold">{activeDominantSide === "left" ? "Left" : "Right"}</p>
+                    <p className="text-sm text-muted-foreground">{t("惯用手侧", "Weapon Side")}</p>
+                    <p className="text-2xl font-bold">{activeDominantSide === "left" ? t("左手", "Left") : t("右手", "Right")}</p>
                     <p className="text-xs text-muted-foreground">
-                      {dominantSideMode === "auto" ? "Auto detected" : "Manual override"}
+                      {dominantSideMode === "auto" ? t("自动识别", "Auto detected") : t("手动覆盖", "Manual override")}
                     </p>
                   </div>
                 </div>
@@ -1391,7 +1509,7 @@ export default function VideoDetail() {
                 <div className="mb-4 rounded-xl border border-border bg-background/60 p-3">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <p className="text-sm text-muted-foreground">
-                      Live metrics are normalized by shoulder width and smoothed with a 3-frame EMA.
+                      {t("实时指标按肩宽归一化，并使用 3 帧 EMA 平滑。", "Live metrics are normalized by shoulder width and smoothed with a 3-frame EMA.")}
                     </p>
                     <div className="flex items-center gap-2">
                       <div className="inline-flex rounded-lg border border-border bg-card p-1">
@@ -1406,7 +1524,7 @@ export default function VideoDetail() {
                                 : "text-muted-foreground hover:text-foreground"
                             }`}
                           >
-                            {mode === "auto" ? "Auto" : mode === "left" ? "Left" : "Right"}
+                            {mode === "auto" ? t("自动", "Auto") : mode === "left" ? t("左手", "Left") : t("右手", "Right")}
                           </button>
                         ))}
                       </div>
@@ -1419,7 +1537,7 @@ export default function VideoDetail() {
                       >
                         <button
                           type="button"
-                          aria-label="Show dominant hand selector help"
+                          aria-label={t("显示惯用手选择说明", "Show dominant hand selector help")}
                           aria-haspopup="true"
                           aria-expanded={isDominantHintOpen}
                           aria-describedby={isDominantHintOpen ? "dominant-hand-tooltip" : undefined}
@@ -1446,7 +1564,10 @@ export default function VideoDetail() {
                             role="tooltip"
                             className="absolute right-0 top-full z-20 mt-2 w-64 rounded-lg border border-border bg-popover px-3 py-2 text-xs leading-relaxed text-popover-foreground shadow-lg"
                           >
-                            Dominant hand selector: this controls weapon-side metrics (lead/rear mapping).
+                            {t(
+                              "惯用手选择器：该选项会影响武器侧指标（lead/rear 对应关系）。",
+                              "Dominant hand selector: this controls weapon-side metrics (lead/rear mapping).",
+                            )}
                           </div>
                         ) : null}
                       </div>
@@ -1456,7 +1577,7 @@ export default function VideoDetail() {
 
                 {!currentPoseFrame ? (
                   <div className="rounded-lg border border-border bg-background px-3 py-4 text-sm text-muted-foreground">
-                    No pose frame matched the current playback time yet.
+                    {t("当前播放时间尚未匹配到姿态帧。", "No pose frame matched the current playback time yet.")}
                   </div>
                 ) : (
                   <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -1478,7 +1599,7 @@ export default function VideoDetail() {
                         <p className="mt-1 text-xs text-muted-foreground">{metric.hint}</p>
                         {metric.lowConfidence ? (
                           <p className="mt-2 text-xs font-medium text-amber-700 dark:text-amber-300">
-                            Low confidence in this frame.
+                            {t("当前帧置信度较低。", "Low confidence in this frame.")}
                           </p>
                         ) : null}
                       </article>
@@ -1493,16 +1614,18 @@ export default function VideoDetail() {
           <div className="mb-6">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-xl font-semibold">AI Analysis Report</h2>
+                <h2 className="text-xl font-semibold">{t("AI 分析报告", "AI Analysis Report")}</h2>
                 {poseData ? (
                   <p className="mt-1 text-sm text-muted-foreground">
-                    Report target follows the replay focus: {selectedAthleteLabel}. Switching athlete only loads that athlete&apos;s saved report.
+                    {t("报告对象跟随回放焦点：", "Report target follows the replay focus: ")}
+                    {selectedAthleteLabel}
+                    {t("。切换运动员只会加载对应已保存报告。", ". Switching athlete only loads that athlete's saved report.")}
                   </p>
                 ) : null}
               </div>
               {poseData ? (
                 <span className="rounded-full border border-border bg-card px-3 py-1 text-xs font-medium text-muted-foreground">
-                  Synced with replay focus
+                  {t("已与回放焦点同步", "Synced with replay focus")}
                 </span>
               ) : null}
             </div>
@@ -1518,10 +1641,11 @@ export default function VideoDetail() {
                 <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                   <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                     <span className="rounded-full bg-secondary px-2.5 py-1">
-                      {report.cached ? "Cached report" : "Saved report"}
+                      {report.cached ? t("缓存报告", "Cached report") : t("已保存报告", "Saved report")}
                     </span>
                     <span>
-                      Updated {new Date(report.updated_at).toLocaleString("en-US", {
+                      {t("更新于 ", "Updated ")}
+                      {new Date(report.updated_at).toLocaleString(isZh ? "zh-CN" : "en-US", {
                         year: "numeric",
                         month: "short",
                         day: "numeric",
@@ -1529,15 +1653,17 @@ export default function VideoDetail() {
                         minute: "2-digit",
                       })}
                     </span>
-                    {reportLoading && reportAction === "load" && <span>Loading saved report...</span>}
-                    {reportLoading && reportAction === "generate" && <span>Updating report...</span>}
+                    {reportLoading && reportAction === "load" && <span>{t("正在加载已保存报告...", "Loading saved report...")}</span>}
+                    {reportLoading && reportAction === "generate" && <span>{t("正在更新报告...", "Updating report...")}</span>}
                   </div>
                 </div>
                 <ReportMarkdown content={report.report} summary={report.summary} />
                 {poseData ? (
                   <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
                     <p className="text-sm text-muted-foreground">
-                      Need a fresh pass for {selectedAthleteLabel}? Generate a new saved report here.
+                      {t("需要为以下对象重新分析吗：", "Need a fresh pass for ")}
+                      {selectedAthleteLabel}
+                      {t("？可在此生成新的已保存报告。", "? Generate a new saved report here.")}
                     </p>
                     <button
                       onClick={generateReport}
@@ -1545,8 +1671,10 @@ export default function VideoDetail() {
                       className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       {reportLoading && reportAction === "generate"
-                        ? "Regenerating..."
-                        : `Regenerate ${getAthleteSlotShortLabel(selectedAthleteSlot)} Report`}
+                        ? t("重新生成中...", "Regenerating...")
+                        : isZh
+                          ? `重新生成 ${getAthleteSlotShortLabel(selectedAthleteSlot)} 报告`
+                          : `Regenerate ${getAthleteSlotShortLabel(selectedAthleteSlot)} Report`}
                     </button>
                   </div>
                 ) : null}
@@ -1558,20 +1686,26 @@ export default function VideoDetail() {
                     <div className="flex flex-col items-center gap-3">
                       <div className="w-6 h-6 border-4 border-primary border-t-transparent rounded-full animate-spin"></div>
                       <p className="text-muted-foreground text-sm">
-                        {reportAction === "generate" ? "Generating AI report..." : "Loading saved report..."}
+                        {reportAction === "generate"
+                          ? t("正在生成 AI 报告...", "Generating AI report...")
+                          : t("正在加载已保存报告...", "Loading saved report...")}
                       </p>
                     </div>
                   </div>
                 ) : (
                   <div className="text-center py-4">
                     <p className="text-muted-foreground mb-4">
-                      No saved report found for {selectedAthleteLabel}. Generate one when you want to save a dedicated report for this athlete.
+                      {t("未找到以下对象的已保存报告：", "No saved report found for ")}
+                      {selectedAthleteLabel}
+                      {t("。如需保存该对象的专属报告，可立即生成。", ". Generate one when you want to save a dedicated report for this athlete.")}
                     </p>
                     <button
                       onClick={generateReport}
                       className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
                     >
-                      Generate {getAthleteSlotShortLabel(selectedAthleteSlot)} Report
+                      {isZh
+                        ? `生成 ${getAthleteSlotShortLabel(selectedAthleteSlot)} 报告`
+                        : `Generate ${getAthleteSlotShortLabel(selectedAthleteSlot)} Report`}
                     </button>
                   </div>
                 )}
@@ -1579,7 +1713,7 @@ export default function VideoDetail() {
             ) : (
               <div className="p-4 rounded-xl bg-muted/50 border border-border">
                 <p className="text-muted-foreground text-sm">
-                  No pose data available. Run pose analysis first to generate an AI report.
+                  {t("暂无姿态数据。请先运行姿态分析后再生成 AI 报告。", "No pose data available. Run pose analysis first to generate an AI report.")}
                 </p>
               </div>
             )}
@@ -1593,15 +1727,15 @@ export default function VideoDetail() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
                 </svg>
               </div>
-              <h3 className="text-lg font-semibold mb-2">No Analysis Data</h3>
+              <h3 className="text-lg font-semibold mb-2">{t("暂无分析数据", "No Analysis Data")}</h3>
               <p className="text-muted-foreground text-sm mb-4">
-                This video has not been analyzed yet. Go to Analyze to run pose detection.
+                {t("该视频尚未完成分析，请前往 Analyze 运行姿态检测。", "This video has not been analyzed yet. Go to Analyze to run pose detection.")}
               </p>
               <Link
                 href={`/analyze?video=${videoId}`}
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
               >
-                Run Analysis
+                {t("运行分析", "Run Analysis")}
               </Link>
             </div>
           )}

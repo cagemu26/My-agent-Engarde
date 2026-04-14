@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import { TopNav } from "@/components/top-nav";
 import { authFetch } from "@/lib/api";
 import { useAuth, type AuthUser } from "@/lib/auth";
+import { useLocale } from "@/lib/locale";
 
 const PROFILE_NAV_LINKS = [
   { href: "/analyze", label: "Analyze" },
@@ -44,6 +45,7 @@ const getInitials = (username: string, email: string) => {
 };
 
 export default function ProfilePage() {
+  const { isZh } = useLocale();
   const router = useRouter();
   const { user, isLoading, logout } = useAuth();
   const [profile, setProfile] = useState<AuthUser | null>(user);
@@ -70,7 +72,7 @@ export default function ProfilePage() {
       try {
         const response = await authFetch("/api/auth/me");
         if (!response.ok) {
-          throw new Error("Failed to refresh profile information.");
+          throw new Error(isZh ? "刷新资料失败。" : "Failed to refresh profile information.");
         }
         const data = (await response.json()) as AuthUser;
         if (cancelled) {
@@ -82,7 +84,7 @@ export default function ProfilePage() {
         if (cancelled) {
           return;
         }
-        setRefreshError(error instanceof Error ? error.message : "Failed to refresh profile information.");
+        setRefreshError(error instanceof Error ? error.message : isZh ? "刷新资料失败。" : "Failed to refresh profile information.");
       }
     };
 
@@ -91,7 +93,7 @@ export default function ProfilePage() {
     return () => {
       cancelled = true;
     };
-  }, [user]);
+  }, [isZh, user]);
 
   const currentUser = profile ?? user;
   const avatarInitials = useMemo(() => {
@@ -124,9 +126,11 @@ export default function ProfilePage() {
                 {avatarInitials}
               </div>
               <div>
-                <h1 className="text-2xl font-semibold text-foreground">个人资料</h1>
+                <h1 className="text-2xl font-semibold text-foreground">{isZh ? "个人资料" : "Profile"}</h1>
                 <p className="text-sm font-medium text-foreground">{currentUser.username}</p>
-                <p className="text-sm text-muted-foreground">Read-only account details from your current session.</p>
+                <p className="text-sm text-muted-foreground">
+                  {isZh ? "当前会话的只读账户信息。" : "Read-only account details from your current session."}
+                </p>
               </div>
             </div>
             <span
@@ -134,29 +138,29 @@ export default function ProfilePage() {
                 currentUser.is_admin ? "bg-red-100 text-red-700" : "bg-zinc-100 text-zinc-700"
               }`}
             >
-              {currentUser.is_admin ? "Admin" : "User"}
+              {currentUser.is_admin ? (isZh ? "管理员" : "Admin") : isZh ? "用户" : "User"}
             </span>
           </div>
 
           <dl className="mt-6 grid gap-4 sm:grid-cols-2">
             <div className="rounded-2xl border border-border/60 bg-background p-4">
-              <dt className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Username</dt>
+              <dt className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{isZh ? "用户名" : "Username"}</dt>
               <dd className="mt-2 text-base font-medium text-foreground">{currentUser.username}</dd>
             </div>
             <div className="rounded-2xl border border-border/60 bg-background p-4">
-              <dt className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Email</dt>
+              <dt className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{isZh ? "邮箱" : "Email"}</dt>
               <dd className="mt-2 text-base font-medium text-foreground break-all">{currentUser.email}</dd>
             </div>
             <div className="rounded-2xl border border-border/60 bg-background p-4">
-              <dt className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Email Verified</dt>
-              <dd className="mt-2 text-base font-medium text-foreground">{currentUser.email_verified ? "Yes" : "No"}</dd>
+              <dt className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{isZh ? "邮箱验证" : "Email Verified"}</dt>
+              <dd className="mt-2 text-base font-medium text-foreground">{currentUser.email_verified ? (isZh ? "是" : "Yes") : isZh ? "否" : "No"}</dd>
             </div>
             <div className="rounded-2xl border border-border/60 bg-background p-4">
-              <dt className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Role</dt>
-              <dd className="mt-2 text-base font-medium text-foreground">{currentUser.is_admin ? "Admin" : "User"}</dd>
+              <dt className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{isZh ? "角色" : "Role"}</dt>
+              <dd className="mt-2 text-base font-medium text-foreground">{currentUser.is_admin ? (isZh ? "管理员" : "Admin") : isZh ? "用户" : "User"}</dd>
             </div>
             <div className="rounded-2xl border border-border/60 bg-background p-4">
-              <dt className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Created At</dt>
+              <dt className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{isZh ? "创建时间" : "Created At"}</dt>
               <dd className="mt-2 text-base font-medium text-foreground">{formatCreatedAt(currentUser.created_at)}</dd>
             </div>
           </dl>
@@ -170,14 +174,14 @@ export default function ProfilePage() {
               href="/reset-password"
               className="rounded-xl border border-border bg-background px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-muted"
             >
-              Reset password
+              {isZh ? "重置密码" : "Reset password"}
             </Link>
             <button
               type="button"
               onClick={logout}
               className="rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-sm font-medium text-red-700 transition-colors hover:bg-red-100"
             >
-              Logout
+              {isZh ? "退出登录" : "Logout"}
             </button>
           </div>
         </section>

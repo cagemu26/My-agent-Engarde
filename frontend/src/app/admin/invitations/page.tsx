@@ -7,6 +7,7 @@ import { useAuth } from "@/lib/auth";
 import { buildApiUrl } from "@/lib/api";
 import { TopNav } from "@/components/top-nav";
 import { useAppDialog } from "@/components/app-dialog-provider";
+import { useLocale } from "@/lib/locale";
 
 const ADMIN_NAV_LINKS = [
   { href: "/analyze", label: "Analyze" },
@@ -29,6 +30,7 @@ export default function InvitationsPage() {
   const { user, token, isLoading } = useAuth();
   const { confirm } = useAppDialog();
   const router = useRouter();
+  const { isZh } = useLocale();
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -65,7 +67,7 @@ export default function InvitationsPage() {
         return;
       }
       if (!response.ok) {
-        throw new Error("Failed to fetch invitations");
+        throw new Error(isZh ? "获取邀请码失败" : "Failed to fetch invitations");
       }
       const data = await response.json();
       if (abortController.signal.aborted || requestId !== invitationsFetchRequestIdRef.current) {
@@ -81,7 +83,7 @@ export default function InvitationsPage() {
       ) {
         return;
       }
-      setError(err instanceof Error ? err.message : "An error occurred");
+      setError(err instanceof Error ? err.message : isZh ? "发生错误" : "An error occurred");
     } finally {
       if (requestId === invitationsFetchRequestIdRef.current) {
         setLoading(false);
@@ -90,7 +92,7 @@ export default function InvitationsPage() {
         invitationsFetchAbortRef.current = null;
       }
     }
-  }, [token]);
+  }, [isZh, token]);
 
   useEffect(() => {
     if (user && user.is_admin && token) {
@@ -120,14 +122,18 @@ export default function InvitationsPage() {
       });
       if (!response.ok) {
         const data = await response.json();
-        throw new Error(data.detail || "Failed to create invitations");
+        throw new Error(data.detail || (isZh ? "创建邀请码失败" : "Failed to create invitations"));
       }
       const data = await response.json();
-      setSuccess(`Created ${count} invitation code(s): ${data.invitations.map((i: { code: string }) => i.code).join(", ")}`);
+      setSuccess(
+        isZh
+          ? `已创建 ${count} 个邀请码：${data.invitations.map((i: { code: string }) => i.code).join(", ")}`
+          : `Created ${count} invitation code(s): ${data.invitations.map((i: { code: string }) => i.code).join(", ")}`,
+      );
       setTimeout(() => setSuccess(""), 10000);
       await fetchInvitations();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "An error occurred");
+      setError(err instanceof Error ? err.message : isZh ? "发生错误" : "An error occurred");
       setTimeout(() => setError(""), 3000);
     } finally {
       setIsCreating(false);
@@ -136,10 +142,10 @@ export default function InvitationsPage() {
 
   const deleteInvitation = async (id: string) => {
     const confirmed = await confirm({
-      title: "Delete invitation code?",
-      description: "This action cannot be undone.",
-      confirmText: "Delete",
-      cancelText: "Cancel",
+      title: isZh ? "删除邀请码？" : "Delete invitation code?",
+      description: isZh ? "此操作不可撤销。" : "This action cannot be undone.",
+      confirmText: isZh ? "删除" : "Delete",
+      cancelText: isZh ? "取消" : "Cancel",
       danger: true,
     });
     if (!confirmed) return;
@@ -153,19 +159,19 @@ export default function InvitationsPage() {
       });
       if (!response.ok) {
         const data = await response.json();
-        throw new Error(data.detail || "Failed to delete invitation");
+        throw new Error(data.detail || (isZh ? "删除邀请码失败" : "Failed to delete invitation"));
       }
-      setSuccess("Invitation deleted successfully");
+      setSuccess(isZh ? "邀请码已删除" : "Invitation deleted successfully");
       setTimeout(() => setSuccess(""), 3000);
       await fetchInvitations();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "An error occurred");
+      setError(err instanceof Error ? err.message : isZh ? "发生错误" : "An error occurred");
       setTimeout(() => setError(""), 3000);
     }
   };
 
   const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleDateString("en-US", {
+    return new Date(dateString).toLocaleDateString(isZh ? "zh-CN" : "en-US", {
       year: "numeric",
       month: "short",
       day: "numeric",
@@ -174,7 +180,7 @@ export default function InvitationsPage() {
 
   const copyToClipboard = (code: string) => {
     navigator.clipboard.writeText(code);
-    setSuccess("Code copied to clipboard");
+    setSuccess(isZh ? "邀请码已复制到剪贴板" : "Code copied to clipboard");
     setTimeout(() => setSuccess(""), 2000);
   };
 
@@ -206,14 +212,16 @@ export default function InvitationsPage() {
         <div className="max-w-7xl mx-auto px-6">
           <div className="mb-8 flex items-center justify-between">
             <div>
-              <h1 className="text-3xl font-bold mb-2">Invitation Codes</h1>
-              <p className="text-muted-foreground">Manage invitation codes for user registration</p>
+              <h1 className="text-3xl font-bold mb-2">{isZh ? "邀请码管理" : "Invitation Codes"}</h1>
+              <p className="text-muted-foreground">
+                {isZh ? "管理用户注册使用的邀请码" : "Manage invitation codes for user registration"}
+              </p>
             </div>
             <Link
               href="/admin"
               className="rounded-full border border-border bg-card px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-muted"
             >
-              Back to Admin
+              {isZh ? "返回管理后台" : "Back to Admin"}
             </Link>
           </div>
 
@@ -231,10 +239,10 @@ export default function InvitationsPage() {
 
           {/* Create New Invitation */}
           <div className="glass-card rounded-3xl p-6 mb-6">
-            <h2 className="text-lg font-semibold mb-4">Create New Invitation Code</h2>
+            <h2 className="text-lg font-semibold mb-4">{isZh ? "创建邀请码" : "Create New Invitation Code"}</h2>
             <div className="flex flex-wrap items-end gap-4">
               <div>
-                <label className="block text-sm font-medium mb-2">Valid for (days)</label>
+                <label className="block text-sm font-medium mb-2">{isZh ? "有效期（天）" : "Valid for (days)"}</label>
                 <input
                   type="number"
                   value={daysValid}
@@ -248,21 +256,21 @@ export default function InvitationsPage() {
                 disabled={isCreating}
                 className="px-6 py-2 rounded-xl bg-gradient-to-r from-red-600 to-red-700 text-white font-medium hover:shadow-lg hover:shadow-red-500/30 transition-all disabled:opacity-50"
               >
-                {isCreating ? "Creating..." : "Create 1 Code"}
+                {isCreating ? (isZh ? "创建中..." : "Creating...") : isZh ? "创建 1 个邀请码" : "Create 1 Code"}
               </button>
               <button
                 onClick={() => createInvitations(5)}
                 disabled={isCreating}
                 className="px-6 py-2 rounded-xl bg-gradient-to-r from-red-600 to-red-700 text-white font-medium hover:shadow-lg hover:shadow-red-500/30 transition-all disabled:opacity-50"
               >
-                {isCreating ? "Creating..." : "Create 5 Codes"}
+                {isCreating ? (isZh ? "创建中..." : "Creating...") : isZh ? "创建 5 个邀请码" : "Create 5 Codes"}
               </button>
               <button
                 onClick={() => createInvitations(10)}
                 disabled={isCreating}
                 className="px-6 py-2 rounded-xl bg-gradient-to-r from-red-600 to-red-700 text-white font-medium hover:shadow-lg hover:shadow-red-500/30 transition-all disabled:opacity-50"
               >
-                {isCreating ? "Creating..." : "Create 10 Codes"}
+                {isCreating ? (isZh ? "创建中..." : "Creating...") : isZh ? "创建 10 个邀请码" : "Create 10 Codes"}
               </button>
             </div>
           </div>
@@ -273,11 +281,11 @@ export default function InvitationsPage() {
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-border">
-                    <th className="text-left p-6 font-medium text-muted-foreground">Code</th>
-                    <th className="text-left p-6 font-medium text-muted-foreground">Status</th>
-                    <th className="text-left p-6 font-medium text-muted-foreground">Expires</th>
-                    <th className="text-left p-6 font-medium text-muted-foreground">Used By</th>
-                    <th className="text-left p-6 font-medium text-muted-foreground">Actions</th>
+                    <th className="text-left p-6 font-medium text-muted-foreground">{isZh ? "邀请码" : "Code"}</th>
+                    <th className="text-left p-6 font-medium text-muted-foreground">{isZh ? "状态" : "Status"}</th>
+                    <th className="text-left p-6 font-medium text-muted-foreground">{isZh ? "到期时间" : "Expires"}</th>
+                    <th className="text-left p-6 font-medium text-muted-foreground">{isZh ? "使用者" : "Used By"}</th>
+                    <th className="text-left p-6 font-medium text-muted-foreground">{isZh ? "操作" : "Actions"}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -291,7 +299,7 @@ export default function InvitationsPage() {
                           <button
                             onClick={() => copyToClipboard(inv.code)}
                             className="p-1.5 rounded-md hover:bg-muted transition-colors"
-                            title="Copy to clipboard"
+                            title={isZh ? "复制到剪贴板" : "Copy to clipboard"}
                           >
                             <svg className="w-4 h-4 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
@@ -307,7 +315,7 @@ export default function InvitationsPage() {
                               : "bg-red-100 text-red-700"
                           }`}
                         >
-                          {inv.is_active ? "Active" : "Used"}
+                          {inv.is_active ? (isZh ? "可用" : "Active") : isZh ? "已使用" : "Used"}
                         </span>
                       </td>
                       <td className="p-6 text-muted-foreground">
@@ -315,7 +323,9 @@ export default function InvitationsPage() {
                       </td>
                       <td className="p-6 text-muted-foreground">
                         {inv.used_by ? (
-                          <span className="text-foreground">User ID: {inv.used_by.slice(0, 8)}...</span>
+                          <span className="text-foreground">
+                            {isZh ? "用户 ID" : "User ID"}: {inv.used_by.slice(0, 8)}...
+                          </span>
                         ) : (
                           "-"
                         )}
@@ -325,7 +335,7 @@ export default function InvitationsPage() {
                           onClick={() => deleteInvitation(inv.id)}
                           className="px-4 py-2 rounded-xl bg-red-100 text-red-700 text-sm font-medium hover:bg-red-200 transition-all"
                         >
-                          Delete
+                          {isZh ? "删除" : "Delete"}
                         </button>
                       </td>
                     </tr>
@@ -335,7 +345,7 @@ export default function InvitationsPage() {
             </div>
             {invitations.length === 0 && (
               <div className="p-12 text-center text-muted-foreground">
-                No invitation codes found. Create one above.
+                {isZh ? "暂无邀请码，请先在上方创建。" : "No invitation codes found. Create one above."}
               </div>
             )}
           </div>

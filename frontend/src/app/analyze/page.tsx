@@ -41,10 +41,31 @@ import { ChatMarkdown } from "@/components/chat-markdown";
 import { ReportMarkdown } from "@/components/report-markdown";
 import { TopNav } from "@/components/top-nav";
 import { useAppDialog } from "@/components/app-dialog-provider";
+import { useLocale } from "@/lib/locale";
 
 interface Message {
   role: "user" | "assistant";
   content: string;
+  citations?: CitationRecord[];
+  retrievalMeta?: RetrievalMetaRecord | null;
+}
+
+interface CitationRecord {
+  chunk_id: string;
+  doc_id: string;
+  title: string;
+  source: string;
+  snippet: string;
+  score: number;
+}
+
+interface RetrievalMetaRecord {
+  use_kb: boolean;
+  provider?: string | null;
+  collection?: string | null;
+  hit_count: number;
+  degraded: boolean;
+  degrade_reason?: string | null;
 }
 
 interface VideoFile {
@@ -161,6 +182,8 @@ interface ChatSessionMessageRecord {
   id: string;
   role: "user" | "assistant";
   content: string;
+  citations?: CitationRecord[] | null;
+  retrieval_meta?: RetrievalMetaRecord | null;
   created_at: string;
 }
 
@@ -216,14 +239,22 @@ const MIN_CONTEXT_FRAMES = 96;
 const CONTEXT_POSE_MAX_FRAMES = 560;
 const MAX_REPORT_EXCERPT_CHARS = 2400;
 
-const DEFAULT_CHAT_OPENING =
+const DEFAULT_CHAT_OPENING_EN =
   "Hi! I'm your fencing AI coach. Ask me anything about technique, training, or analyze your videos. How can I help you today?";
+const DEFAULT_CHAT_OPENING_ZH =
+  "你好！我是你的击剑 AI 教练。你可以问我技术、训练或视频分析相关问题。现在想先聊哪一部分？";
 
-const DEFAULT_QUICK_PROMPTS = [
+const DEFAULT_QUICK_PROMPTS_EN = [
   "How to improve my lunge?",
   "What are common footwork mistakes?",
   "How to defend against attacks?",
   "What is a good weekly training routine?",
+];
+const DEFAULT_QUICK_PROMPTS_ZH = [
+  "我该如何改进弓步？",
+  "常见的步法错误有哪些？",
+  "面对进攻时如何防守更稳？",
+  "一周训练安排怎么做更合理？",
 ];
 
 const KEY_POINT_INDEXES: Record<string, number> = {
@@ -243,8 +274,22 @@ const KEY_POINT_INDEXES: Record<string, number> = {
 };
 
 const ANALYSIS_MODES = [
-  { value: "pose", label: "Pose Detection", description: "See body posture and movement throughout the bout.", icon: "🦴" },
-  { value: "action", label: "Action Recognition", description: "Identify key fencing actions automatically (Coming Soon).", icon: "🎯" },
+  {
+    value: "pose",
+    labelEn: "Pose Detection",
+    labelZh: "姿态检测",
+    descriptionEn: "See body posture and movement throughout the bout.",
+    descriptionZh: "查看整段对抗中的身体姿态与移动轨迹。",
+    icon: "🦴",
+  },
+  {
+    value: "action",
+    labelEn: "Action Recognition",
+    labelZh: "动作识别",
+    descriptionEn: "Identify key fencing actions automatically (Coming Soon).",
+    descriptionZh: "自动识别关键击剑动作（即将上线）。",
+    icon: "🎯",
+  },
 ];
 
 const WEAPON_TYPES = [
@@ -253,10 +298,15 @@ const WEAPON_TYPES = [
   { value: "sabre", label: "Sabre", color: "#06B6D4", bg: "bg-cyan-500" },
 ];
 
-const WEAPON_TYPE_NOTES: Record<string, string> = {
+const WEAPON_TYPE_NOTES_EN: Record<string, string> = {
   foil: "Emphasizes right-of-way timing, blade control, and clean point line entries.",
   epee: "Prioritizes distance management, counter-time, and single-light risk control.",
   sabre: "Focuses on explosive first actions, tempo shifts, and compact recovery steps.",
+};
+const WEAPON_TYPE_NOTES_ZH: Record<string, string> = {
+  foil: "重点关注优先权时机、剑尖控制和清晰的刺入线路。",
+  epee: "更强调距离管理、反时机处理和单灯风险控制。",
+  sabre: "关注爆发式先手、节奏变化和紧凑的还原步。",
 };
 
 const MAX_FILE_SIZE_MB = 100;
@@ -330,32 +380,35 @@ const layeredSampleFrames = <T extends { frame_index: number }>(frames: T[], tar
 
 const buildSessionStorageKey = (videoId: string) => `${VIDEO_SESSION_STORAGE_PREFIX}${videoId}`;
 
-const formatRelativeTime = (dateString: string) => {
-  if (!dateString) return "Unknown";
+const formatRelativeTime = (dateString: string, isZh = false) => {
+  if (!dateString) return isZh ? "未知" : "Unknown";
 
   const date = new Date(dateString);
-  if (Number.isNaN(date.getTime())) return "Unknown";
+  if (Number.isNaN(date.getTime())) return isZh ? "未知" : "Unknown";
 
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
   const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
   const diffDays = Math.floor(diffHours / 24);
 
-  if (diffHours < 1) return "Just now";
-  if (diffHours < 24) return `${diffHours} hour${diffHours > 1 ? "s" : ""} ago`;
-  if (diffDays === 1) return "Yesterday";
-  if (diffDays < 7) return `${diffDays} days ago`;
-  if (diffDays < 30) return `${Math.floor(diffDays / 7)} week${Math.floor(diffDays / 7) > 1 ? "s" : ""} ago`;
+  if (diffHours < 1) return isZh ? "刚刚" : "Just now";
+  if (diffHours < 24) return isZh ? `${diffHours}小时前` : `${diffHours} hour${diffHours > 1 ? "s" : ""} ago`;
+  if (diffDays === 1) return isZh ? "昨天" : "Yesterday";
+  if (diffDays < 7) return isZh ? `${diffDays}天前` : `${diffDays} days ago`;
+  if (diffDays < 30) {
+    const weeks = Math.floor(diffDays / 7);
+    return isZh ? `${weeks}周前` : `${weeks} week${weeks > 1 ? "s" : ""} ago`;
+  }
   return date.toLocaleDateString();
 };
 
-const getWeaponLabel = (weapon: string) => {
+const getWeaponLabel = (weapon: string, isZh = false) => {
   const labels: Record<string, string> = {
-    foil: "Foil",
-    epee: "Epee",
-    sabre: "Sabre",
+    foil: isZh ? "花剑" : "Foil",
+    epee: isZh ? "重剑" : "Epee",
+    sabre: isZh ? "佩剑" : "Sabre",
   };
-  return labels[weapon?.toLowerCase()] || weapon || "Unknown";
+  return labels[weapon?.toLowerCase()] || weapon || (isZh ? "未知" : "Unknown");
 };
 
 const getSessionTimestamp = (session: ChatSessionRecord) => {
@@ -373,6 +426,15 @@ const parseApiError = async (response: Response, fallback: string): Promise<stri
   }
 };
 
+const toUiMessage = (
+  message: Pick<ChatSessionMessageRecord, "role" | "content" | "citations" | "retrieval_meta">,
+): Message => ({
+  role: message.role,
+  content: message.content,
+  citations: Array.isArray(message.citations) ? message.citations : undefined,
+  retrievalMeta: message.retrieval_meta ?? null,
+});
+
 const getSessionDotColor = (sessionType: SessionType) => {
   if (sessionType === SESSION_TYPE_VIDEO) return "#3B82F6";
   if (sessionType === SESSION_TYPE_TRAINING) return "#F97316";
@@ -388,11 +450,11 @@ const getWeaponColor = (weapon: string) => {
   return colors[weapon?.toLowerCase()] || "#6B7280";
 };
 
-const getResultLabel = (matchResult: string) => {
+const getResultLabel = (matchResult: string, isZh = false) => {
   const result = matchResult?.toLowerCase();
-  if (result === "win") return "Win";
-  if (result === "loss") return "Loss";
-  if (result === "draw") return "Draw";
+  if (result === "win") return isZh ? "胜" : "Win";
+  if (result === "loss") return isZh ? "负" : "Loss";
+  if (result === "draw") return isZh ? "平" : "Draw";
   return "";
 };
 
@@ -400,12 +462,22 @@ function AnalyzeContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { confirm, alert } = useAppDialog();
+  const { isZh } = useLocale();
+  const t = useCallback(
+    (zh: string, en: string) => (isZh ? zh : en),
+    [isZh],
+  );
+  const defaultChatOpening = isZh ? DEFAULT_CHAT_OPENING_ZH : DEFAULT_CHAT_OPENING_EN;
+  const defaultQuickPrompts = useMemo(
+    () => (isZh ? DEFAULT_QUICK_PROMPTS_ZH : DEFAULT_QUICK_PROMPTS_EN),
+    [isZh],
+  );
 
   const [activeTab, setActiveTab] = useState<AnalyzeTab>("chat");
   const [messages, setMessages] = useState<Message[]>([
     {
       role: "assistant",
-      content: DEFAULT_CHAT_OPENING,
+      content: defaultChatOpening,
     },
   ]);
   const [input, setInput] = useState("");
@@ -462,7 +534,7 @@ function AnalyzeContent() {
   const [externalContextSummary, setExternalContextSummary] = useState("");
   const [externalContextStatus, setExternalContextStatus] = useState<ExternalContextStatus | null>(null);
   const [needsExternalContextForNextSend, setNeedsExternalContextForNextSend] = useState(false);
-  const [chatSuggestedPrompts, setChatSuggestedPrompts] = useState<string[]>(DEFAULT_QUICK_PROMPTS);
+  const [chatSuggestedPrompts, setChatSuggestedPrompts] = useState<string[]>(defaultQuickPrompts);
   const [needsFullContextForNextSend, setNeedsFullContextForNextSend] = useState(false);
   const [sessionHydrated, setSessionHydrated] = useState(false);
   const [isDraftChatSession, setIsDraftChatSession] = useState(false);
@@ -619,10 +691,10 @@ function AnalyzeContent() {
   const buildContextSummary = useCallback(
     (video: HistoryItem, athleteSlot: AthleteSlot, reportExcerpt: string, overflow: OverflowMeta) => {
       const summaryLines = [
-        `Video: ${video.title || "Untitled"} (${getWeaponLabel(video.weapon)})`,
+        `Video: ${video.title || (isZh ? "未命名" : "Untitled")} (${getWeaponLabel(video.weapon, isZh)})`,
         `Athlete Slot: ${getAthleteSlotLabel(athleteSlot)}`,
         `Athlete/Opponent: ${video.athlete || "Unknown"} / ${video.opponent || "Unknown"}`,
-        `Tournament: ${video.tournament || "Not set"} | Score: ${video.score || "N/A"} | Result: ${getResultLabel(video.match_result) || "N/A"}`,
+        `Tournament: ${video.tournament || (isZh ? "未设置" : "Not set")} | Score: ${video.score || "N/A"} | Result: ${getResultLabel(video.match_result, isZh) || "N/A"}`,
       ];
 
       summaryLines.push(
@@ -639,7 +711,7 @@ function AnalyzeContent() {
   );
 
   const buildSuggestedPrompts = useCallback((video: HistoryItem) => {
-    const weaponLabel = getWeaponLabel(video.weapon);
+    const weaponLabel = getWeaponLabel(video.weapon, isZh);
     const title = video.title || "this bout";
 
     return [
@@ -970,8 +1042,8 @@ function AnalyzeContent() {
         const restoredMessages: Message[] = detail.messages?.length
           ? detail.messages
               .filter((item) => item.role === "user" || item.role === "assistant")
-              .map((item) => ({ role: item.role, content: item.content }))
-          : [{ role: "assistant", content: DEFAULT_CHAT_OPENING }];
+              .map((item) => toUiMessage(item))
+          : [{ role: "assistant", content: defaultChatOpening }];
 
         setMessages(restoredMessages);
         setActiveChatSessionId(detail.id);
@@ -1049,7 +1121,7 @@ function AnalyzeContent() {
         } else {
           setChatContextSummary(detail.context_summary || "");
           setChatContextStatus(null);
-          setChatSuggestedPrompts(DEFAULT_QUICK_PROMPTS);
+          setChatSuggestedPrompts(defaultQuickPrompts);
           setNeedsFullContextForNextSend(false);
           setChatContextPack(null);
           setSelectedHistoryVideoId(null);
@@ -1090,8 +1162,8 @@ function AnalyzeContent() {
           const fallbackMessages: Message[] = fallbackDetail.messages?.length
             ? fallbackDetail.messages
                 .filter((item) => item.role === "user" || item.role === "assistant")
-                .map((item) => ({ role: item.role, content: item.content }))
-            : [{ role: "assistant", content: DEFAULT_CHAT_OPENING }];
+                .map((item) => toUiMessage(item))
+            : [{ role: "assistant", content: defaultChatOpening }];
 
           setMessages([
             {
@@ -1105,7 +1177,7 @@ function AnalyzeContent() {
           setChatContextPack(null);
           setChatContextSummary(fallbackDetail.context_summary || "");
           setChatContextStatus(null);
-          setChatSuggestedPrompts(DEFAULT_QUICK_PROMPTS);
+          setChatSuggestedPrompts(defaultQuickPrompts);
           setNeedsFullContextForNextSend(false);
           setIsDraftChatSession(false);
           setSessionHydrated(true);
@@ -1123,7 +1195,7 @@ function AnalyzeContent() {
             role: "assistant",
             content:
               "Requested session is unavailable. Started a default chat thread.\n\n" +
-              DEFAULT_CHAT_OPENING,
+              defaultChatOpening,
           },
         ]);
         setActiveChatVideoId(null);
@@ -1131,7 +1203,7 @@ function AnalyzeContent() {
         setChatContextPack(null);
         setChatContextSummary("");
         setChatContextStatus(null);
-        setChatSuggestedPrompts(DEFAULT_QUICK_PROMPTS);
+        setChatSuggestedPrompts(defaultQuickPrompts);
         setNeedsFullContextForNextSend(false);
         setIsDraftChatSession(true);
         setSessionHydrated(true);
@@ -1204,15 +1276,15 @@ function AnalyzeContent() {
           detail?.messages?.length
             ? detail.messages
                 .filter((item) => item.role === "user" || item.role === "assistant")
-                .map((item) => ({ role: item.role, content: item.content }))
-            : [{ role: "assistant", content: DEFAULT_CHAT_OPENING }];
+                .map((item) => toUiMessage(item))
+            : [{ role: "assistant", content: defaultChatOpening }];
 
         setMessages(nextMessages);
         setActiveChatSessionId(requestedSessionId);
         setChatContextPack(null);
         setChatContextStatus(null);
         setChatContextSummary(detail?.context_summary || options?.contextSummary || "");
-        setChatSuggestedPrompts(DEFAULT_QUICK_PROMPTS);
+        setChatSuggestedPrompts(defaultQuickPrompts);
         setNeedsFullContextForNextSend(false);
         setIsDraftChatSession(false);
         setSessionHydrated(true);
@@ -1501,7 +1573,7 @@ function AnalyzeContent() {
       const lines = [
         "Video analysis is now linked to AI coaching.",
         "",
-        `- Video: ${video.title || "Untitled"} (${getWeaponLabel(video.weapon)})`,
+        `- Video: ${video.title || (isZh ? "未命名" : "Untitled")} (${getWeaponLabel(video.weapon, isZh)})`,
         `- Opponent: ${video.opponent || "Unknown"} | Tournament: ${video.tournament || "N/A"}`,
         `- Context coverage: ${overflow.used_frames}/${overflow.original_frames} frames (${Math.round(overflow.coverage_ratio * 100)}%)${overflow.truncated ? " (truncated)" : ""}`,
         "",
@@ -1580,7 +1652,7 @@ function AnalyzeContent() {
           if (detail?.messages?.length) {
             restoredMessages = detail.messages
               .filter((item) => item.role === "user" || item.role === "assistant")
-              .map((item) => ({ role: item.role, content: item.content }));
+              .map((item) => toUiMessage(item));
           }
         }
 
@@ -1743,7 +1815,7 @@ function AnalyzeContent() {
       setExternalContextStatus(handoff.status || null);
       setNeedsExternalContextForNextSend(true);
       setChatSuggestedPrompts(
-        handoff.suggested_prompts?.length ? handoff.suggested_prompts : DEFAULT_QUICK_PROMPTS,
+        handoff.suggested_prompts?.length ? handoff.suggested_prompts : defaultQuickPrompts,
       );
       setNeedsFullContextForNextSend(false);
       setIsDraftChatSession(false);
@@ -1751,7 +1823,7 @@ function AnalyzeContent() {
       const autoQuestion =
         handoff.auto_question?.trim() ||
         handoff.suggested_prompts?.[0]?.trim() ||
-        "评估我最近疲劳和下周负荷安排。";
+        "Evaluate my recent fatigue and suggest next week's load progression.";
       void (async () => {
         const trainingSession = await resolveBackendChatSession({
           sessionType: SESSION_TYPE_TRAINING,
@@ -1918,7 +1990,7 @@ function AnalyzeContent() {
     setActiveTab("analyze");
     setIsMobileSidebarOpen(false);
     setInput("");
-    setMessages([{ role: "assistant", content: DEFAULT_CHAT_OPENING }]);
+    setMessages([{ role: "assistant", content: defaultChatOpening }]);
     setIsTyping(false);
     setIsContextPreparing(false);
     setSessionHydrated(true);
@@ -1931,7 +2003,7 @@ function AnalyzeContent() {
     setChatContextPack(null);
     setChatContextSummary("");
     setChatContextStatus(null);
-    setChatSuggestedPrompts(DEFAULT_QUICK_PROMPTS);
+    setChatSuggestedPrompts(defaultQuickPrompts);
     setNeedsFullContextForNextSend(false);
 
     setExternalContextPayload(null);
@@ -2299,8 +2371,8 @@ function AnalyzeContent() {
                   const restoredMessages: Message[] = detail.messages?.length
                     ? detail.messages
                         .filter((item) => item.role === "user" || item.role === "assistant")
-                        .map((item) => ({ role: item.role, content: item.content }))
-                    : [{ role: "assistant", content: DEFAULT_CHAT_OPENING }];
+                        .map((item) => toUiMessage(item))
+                    : [{ role: "assistant", content: defaultChatOpening }];
                   setMessages(restoredMessages);
                 }
               }
@@ -2462,11 +2534,17 @@ function AnalyzeContent() {
           }
         }
 
+        const kbWeapon = activeChatVideoId
+          ? historyVideos.find((item) => item.video_id === activeChatVideoId)?.weapon?.toLowerCase()
+          : undefined;
+
         const payload = sessionIdForSend
           ? {
               session_id: sessionIdForSend,
               message: userMessage,
               context: contextPayload,
+              use_kb: true,
+              weapon: kbWeapon,
             }
           : {
               messages: recentMessages.map((m) => ({
@@ -2474,6 +2552,8 @@ function AnalyzeContent() {
                 content: m.content,
               })),
               context: contextPayload,
+              use_kb: true,
+              weapon: kbWeapon,
             };
 
         const requestInit: RequestInit = {
@@ -2489,9 +2569,22 @@ function AnalyzeContent() {
           if (!response.ok) {
             throw new Error("Failed to send message");
           }
-          const data = await response.json();
+          const data = (await response.json()) as {
+            message: string;
+            session_id?: string;
+            citations?: CitationRecord[] | null;
+            retrieval_meta?: RetrievalMetaRecord | null;
+          };
           if (!isActiveStream()) return;
-          const updatedMessages = [...nextMessages, { role: "assistant" as const, content: data.message }];
+          const updatedMessages = [
+            ...nextMessages,
+            {
+              role: "assistant" as const,
+              content: data.message,
+              citations: Array.isArray(data.citations) ? data.citations : undefined,
+              retrievalMeta: data.retrieval_meta ?? null,
+            },
+          ];
           setMessages(updatedMessages);
           if (typeof data.session_id === "string" && data.session_id) {
             setActiveChatSessionId(data.session_id);
@@ -2522,10 +2615,26 @@ function AnalyzeContent() {
         let finalMessageFromDone: string | null = null;
         let resolvedSessionId: string | null = sessionIdForSend ?? null;
         let streamErrorMessage: string | null = null;
+        let doneCitations: CitationRecord[] | undefined;
+        let doneRetrievalMeta: RetrievalMetaRecord | null = null;
 
-        const applyAssistantText = (text: string) => {
+        const applyAssistantText = (
+          text: string,
+          options?: {
+            citations?: CitationRecord[];
+            retrievalMeta?: RetrievalMetaRecord | null;
+          },
+        ) => {
           if (!isActiveStream()) return;
-          setMessages([...nextMessages, { role: "assistant" as const, content: text }]);
+          setMessages([
+            ...nextMessages,
+            {
+              role: "assistant" as const,
+              content: text,
+              citations: options?.citations,
+              retrievalMeta: options?.retrievalMeta ?? null,
+            },
+          ]);
         };
 
         const processEventBlock = (block: string) => {
@@ -2574,6 +2683,14 @@ function AnalyzeContent() {
             if (typeof maybeMessage === "string" && maybeMessage) {
               finalMessageFromDone = maybeMessage;
             }
+            const maybeCitations = payloadData?.citations;
+            if (Array.isArray(maybeCitations)) {
+              doneCitations = maybeCitations as CitationRecord[];
+            }
+            const maybeRetrievalMeta = payloadData?.retrieval_meta;
+            if (maybeRetrievalMeta && typeof maybeRetrievalMeta === "object") {
+              doneRetrievalMeta = maybeRetrievalMeta as RetrievalMetaRecord;
+            }
             const maybeSessionId = payloadData?.session_id;
             if (typeof maybeSessionId === "string" && maybeSessionId) {
               resolvedSessionId = maybeSessionId;
@@ -2619,7 +2736,15 @@ function AnalyzeContent() {
 
         if (finalMessageFromDone) {
           streamedAssistant = finalMessageFromDone;
-          applyAssistantText(streamedAssistant);
+          applyAssistantText(streamedAssistant, {
+            citations: doneCitations,
+            retrievalMeta: doneRetrievalMeta,
+          });
+        } else if (doneCitations || doneRetrievalMeta) {
+          applyAssistantText(streamedAssistant, {
+            citations: doneCitations,
+            retrievalMeta: doneRetrievalMeta,
+          });
         }
 
         if (!streamedAssistant.trim()) {
@@ -2664,6 +2789,7 @@ function AnalyzeContent() {
       ensureActiveVideoContext,
       externalContextPayload,
       externalContextSummary,
+      historyVideos,
       isContextPreparing,
       isDraftChatSession,
       isTyping,
@@ -2720,7 +2846,7 @@ function AnalyzeContent() {
 
     setActiveTab("chat");
     setInput("");
-    setMessages([{ role: "assistant", content: DEFAULT_CHAT_OPENING }]);
+    setMessages([{ role: "assistant", content: defaultChatOpening }]);
     setIsTyping(false);
     setIsContextPreparing(false);
     setSessionHydrated(true);
@@ -2741,7 +2867,7 @@ function AnalyzeContent() {
     setChatContextPack(null);
     setChatContextSummary("");
     setChatContextStatus(null);
-    setChatSuggestedPrompts(DEFAULT_QUICK_PROMPTS);
+    setChatSuggestedPrompts(defaultQuickPrompts);
     setNeedsFullContextForNextSend(false);
 
     setExternalContextPayload(null);
@@ -2870,7 +2996,16 @@ function AnalyzeContent() {
   };
 
   const selectedWeaponStyle = getWeaponStyle(selectedWeapon);
-  const selectedWeaponNote = WEAPON_TYPE_NOTES[selectedWeapon] ?? WEAPON_TYPE_NOTES.epee;
+  const selectedWeaponNotes = isZh ? WEAPON_TYPE_NOTES_ZH : WEAPON_TYPE_NOTES_EN;
+  const selectedWeaponNote = selectedWeaponNotes[selectedWeapon] ?? selectedWeaponNotes.epee;
+  const getSessionTypeLabel = useCallback(
+    (sessionType: SessionType) => {
+      if (sessionType === SESSION_TYPE_VIDEO) return t("视频分析", "Video Analysis");
+      if (sessionType === SESSION_TYPE_TRAINING) return t("训练分析", "Training Analysis");
+      return t("AI 对话", "Assistant Chat");
+    },
+    [t],
+  );
 
   const historyVideoById = useMemo(() => {
     const map = new Map<string, HistoryItem>();
@@ -2888,16 +3023,16 @@ function AnalyzeContent() {
 
       if (normalizedType === SESSION_TYPE_VIDEO) {
         if (session.video_id) {
-          return historyVideoById.get(session.video_id)?.title || "Video Analysis";
+          return historyVideoById.get(session.video_id)?.title || getSessionTypeLabel(SESSION_TYPE_VIDEO);
         }
-        return "Video Analysis";
+        return getSessionTypeLabel(SESSION_TYPE_VIDEO);
       }
       if (normalizedType === SESSION_TYPE_TRAINING) {
-        return "Training Analysis";
+        return getSessionTypeLabel(SESSION_TYPE_TRAINING);
       }
-      return "Assistant Chat";
+      return getSessionTypeLabel(SESSION_TYPE_CHAT);
     },
-    [historyVideoById],
+    [getSessionTypeLabel, historyVideoById],
   );
 
   const getSessionSubtitle = useCallback(
@@ -2909,7 +3044,7 @@ function AnalyzeContent() {
         return [video.athlete, video.opponent ? `vs ${video.opponent}` : "", video.tournament]
           .filter(Boolean)
           .join(" ")
-          || "Video coaching thread";
+          || t("视频教练会话", "Video coaching thread");
       }
 
       if (session.context_summary?.trim()) {
@@ -2917,14 +3052,14 @@ function AnalyzeContent() {
       }
 
       if (normalizedType === SESSION_TYPE_TRAINING) {
-        return "Training record analysis thread";
+        return t("训练记录分析会话", "Training record analysis thread");
       }
       if (normalizedType === SESSION_TYPE_VIDEO) {
-        return "Video coaching thread";
+        return t("视频教练会话", "Video coaching thread");
       }
-      return "General AI Q&A thread";
+      return t("通用 AI 问答会话", "General AI Q&A thread");
     },
-    [historyVideoById],
+    [historyVideoById, t],
   );
 
   const filteredChatSessions = useMemo(() => {
@@ -2937,7 +3072,7 @@ function AnalyzeContent() {
       const text = [
         getSessionTitle(session),
         getSessionSubtitle(session),
-        SESSION_META[normalizedType].label,
+        getSessionTypeLabel(normalizedType),
         video?.title,
         video?.athlete,
         video?.opponent,
@@ -2950,7 +3085,7 @@ function AnalyzeContent() {
     });
 
     return base.sort((a, b) => getSessionTimestamp(b) - getSessionTimestamp(a));
-  }, [chatSessions, getSessionSubtitle, getSessionTitle, historyVideoById, sessionSearch]);
+  }, [chatSessions, getSessionSubtitle, getSessionTitle, getSessionTypeLabel, historyVideoById, sessionSearch]);
 
   const activeChatSession = useMemo(
     () => chatSessions.find((session) => session.id === activeChatSessionId) ?? null,
@@ -2971,22 +3106,23 @@ function AnalyzeContent() {
   }, [activeChatSession, activeChatVideoId, externalContextStatus]);
 
   const activeChatSessionMeta = SESSION_META[activeChatSessionType];
+  const activeChatSessionLabel = getSessionTypeLabel(activeChatSessionType);
 
   const activeChatSessionTitle = activeChatSession
     ? getSessionTitle(activeChatSession)
     : activeChatVideoId
-      ? historyVideoById.get(activeChatVideoId)?.title || activeChatSessionMeta.label
+      ? historyVideoById.get(activeChatVideoId)?.title || activeChatSessionLabel
       : activeChatSessionType === SESSION_TYPE_TRAINING
-        ? "Training Analysis"
-        : "Assistant Chat";
+        ? t("训练分析", "Training Analysis")
+        : t("AI 对话", "Assistant Chat");
 
   const activeChatSessionSubtitle = activeChatSession
     ? getSessionSubtitle(activeChatSession)
     : activeChatVideoId
-      ? "Video coaching thread"
+      ? t("视频教练会话", "Video coaching thread")
       : activeChatSessionType === SESSION_TYPE_TRAINING
-        ? "Training record analysis thread"
-        : "General AI Q&A thread";
+        ? t("训练记录分析会话", "Training record analysis thread")
+        : t("通用 AI 问答会话", "General AI Q&A thread");
 
   const groupedChatSessions = useMemo<HistoryGroup[]>(() => {
     const today: ChatSessionRecord[] = [];
@@ -3020,13 +3156,13 @@ function AnalyzeContent() {
     }
 
     const groups: HistoryGroup[] = [
-      { key: "today", label: "Today", items: today },
-      { key: "week", label: "Last 7 Days", items: week },
-      { key: "earlier", label: "Earlier", items: earlier },
+      { key: "today", label: t("今天", "Today"), items: today },
+      { key: "week", label: t("最近 7 天", "Last 7 Days"), items: week },
+      { key: "earlier", label: t("更早", "Earlier"), items: earlier },
     ];
 
     return groups.filter((group) => group.items.length > 0);
-  }, [filteredChatSessions]);
+  }, [filteredChatSessions, t]);
 
   const renderSessionRows = (compact: boolean) => {
     if (chatSessionsLoading) {
@@ -3052,7 +3188,7 @@ function AnalyzeContent() {
             onClick={() => void fetchChatSessions()}
             className="mt-2 rounded-lg border border-red-200 px-2 py-1 text-xs font-semibold hover:bg-red-100"
           >
-            Retry
+            {t("重试", "Retry")}
           </button>
         </div>
       );
@@ -3062,13 +3198,13 @@ function AnalyzeContent() {
       if (chatSessions.length === 0) {
         return (
           <div className="rounded-2xl border border-dashed border-border p-4 text-center text-sm text-muted-foreground">
-            No sessions yet. Start a new chat.
+            {t("暂无会话，请先创建新对话。", "No sessions yet. Start a new chat.")}
           </div>
         );
       }
       return (
         <div className="rounded-2xl border border-dashed border-border p-4 text-center text-sm text-muted-foreground">
-          No sessions match your filters.
+          {t("没有匹配当前筛选条件的会话。", "No sessions match your filters.")}
         </div>
       );
     }
@@ -3080,7 +3216,6 @@ function AnalyzeContent() {
             {filteredChatSessions.map((session) => {
               const normalizedType = normalizeSessionType(session.session_type);
               const selected = activeChatSessionId === session.id;
-              const meta = SESSION_META[normalizedType];
               const dotColor = getSessionDotColor(normalizedType);
 
               return (
@@ -3093,7 +3228,7 @@ function AnalyzeContent() {
                       ? "border-foreground/25 bg-muted/70 shadow-sm"
                       : "border-border bg-card hover:border-red-300 hover:bg-card/80"
                   }`}
-                  title={`${meta.label} • ${getSessionTitle(session)}`}
+                  title={`${getSessionTypeLabel(normalizedType)} • ${getSessionTitle(session)}`}
                 >
                   <span
                     className="h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-black/10 dark:ring-white/10"
@@ -3145,14 +3280,14 @@ function AnalyzeContent() {
                         <p className="mt-0.5 truncate text-xs text-muted-foreground">{getSessionSubtitle(session)}</p>
                       </div>
                       <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ${meta.badgeClass}`}>
-                        {meta.label}
+                        {getSessionTypeLabel(normalizedType)}
                       </span>
                     </div>
 
                     <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                      <span>{formatRelativeTime(activityTime)}</span>
+                      <span>{formatRelativeTime(activityTime, isZh)}</span>
                       <span className="rounded-full bg-secondary px-2 py-0.5 text-[11px] font-semibold text-secondary-foreground">
-                        {session.message_count} msgs
+                        {isZh ? `${session.message_count} 条` : `${session.message_count} msgs`}
                       </span>
                       {normalizedType === SESSION_TYPE_VIDEO && session.video_id ? (
                         <button
@@ -3164,7 +3299,7 @@ function AnalyzeContent() {
                           }}
                           className="rounded-full border border-border bg-card px-2 py-0.5 text-[11px] font-semibold text-foreground transition-colors hover:border-red-300 hover:text-red-600"
                         >
-                          Open Video Detail
+                          {t("打开视频详情", "Open Video Detail")}
                         </button>
                       ) : null}
                       <button
@@ -3176,7 +3311,7 @@ function AnalyzeContent() {
                         disabled={deletingSessionId === session.id}
                         className="rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[11px] font-semibold text-red-600 transition-colors hover:border-red-300 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-800 dark:bg-red-900/30 dark:text-red-300"
                       >
-                        {deletingSessionId === session.id ? "Deleting..." : "Delete"}
+                        {deletingSessionId === session.id ? t("删除中...", "Deleting...") : t("删除", "Delete")}
                       </button>
                     </div>
                   </div>
@@ -3302,7 +3437,7 @@ function AnalyzeContent() {
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
               </svg>
-              Sessions
+              {t("会话", "Sessions")}
             </button>
           </div>
 
@@ -3320,7 +3455,7 @@ function AnalyzeContent() {
                         type="button"
                         onClick={() => setIsSidebarCollapsed(false)}
                         className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-border bg-card text-muted-foreground hover:text-foreground"
-                        aria-label="Expand history sidebar"
+                        aria-label={t("展开历史侧栏", "Expand history sidebar")}
                       >
                         <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
@@ -3329,7 +3464,7 @@ function AnalyzeContent() {
                     </div>
                     <div className="mb-3 flex items-center justify-center rounded-xl bg-secondary/60 p-2 text-center">
                       <div className="space-y-0.5">
-                        <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Rec</p>
+                        <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{isZh ? "记录" : "Rec"}</p>
                         <p className="text-sm font-semibold leading-none text-foreground">{chatSessions.length}</p>
                       </div>
                     </div>
@@ -3339,8 +3474,10 @@ function AnalyzeContent() {
                   <>
                     <div className="mb-3 flex items-center justify-between gap-2">
                       <div>
-                        <p className="text-sm font-semibold">Sessions</p>
-                        <p className="text-xs text-muted-foreground">{chatSessions.length} threads</p>
+                        <p className="text-sm font-semibold">{t("会话", "Sessions")}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {isZh ? `${chatSessions.length} 个线程` : `${chatSessions.length} threads`}
+                        </p>
                       </div>
                       <div className="flex items-center gap-2">
                         <button
@@ -3348,13 +3485,13 @@ function AnalyzeContent() {
                           onClick={handleNewChatSession}
                           className="rounded-full border border-border bg-card px-3 py-1 text-xs font-semibold transition-colors hover:border-red-300 hover:text-red-600"
                         >
-                          New Session
+                          {t("新建会话", "New Session")}
                         </button>
                         <button
                           type="button"
                           onClick={() => setIsSidebarCollapsed(true)}
                           className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-border bg-card text-muted-foreground hover:text-foreground"
-                          aria-label="Collapse session sidebar"
+                          aria-label={t("折叠会话侧栏", "Collapse session sidebar")}
                         >
                           <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
@@ -3368,7 +3505,7 @@ function AnalyzeContent() {
                         type="text"
                         value={sessionSearch}
                         onChange={(e) => setSessionSearch(e.target.value)}
-                        placeholder="Search session, summary..."
+                        placeholder={t("搜索会话或摘要...", "Search session, summary...")}
                         className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm"
                       />
                     </div>
@@ -3390,7 +3527,7 @@ function AnalyzeContent() {
                       : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  AI Coach
+                  {t("AI 教练", "AI Coach")}
                 </button>
                 <button
                   type="button"
@@ -3401,7 +3538,7 @@ function AnalyzeContent() {
                       : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  Video Analysis
+                  {t("视频分析", "Video Analysis")}
                 </button>
                 <button
                   type="button"
@@ -3412,7 +3549,7 @@ function AnalyzeContent() {
                       : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  History Detail
+                  {t("历史详情", "History Detail")}
                 </button>
               </div>
 
@@ -3443,11 +3580,13 @@ function AnalyzeContent() {
                             />
                           </svg>
                         </div>
-                        <h3 className="mb-3 text-2xl font-bold">Drop your video here</h3>
-                        <p className="mb-2 text-muted-foreground">or click to browse files</p>
-                        <p className="text-sm text-muted-foreground/70">Supports MP4, MOV, AVI, WebM - Max 100MB</p>
+                        <h3 className="mb-3 text-2xl font-bold">{t("将视频拖到这里", "Drop your video here")}</h3>
+                        <p className="mb-2 text-muted-foreground">{t("或点击选择文件", "or click to browse files")}</p>
+                        <p className="text-sm text-muted-foreground/70">
+                          {t("支持 MP4、MOV、AVI、WebM，最大 100MB", "Supports MP4, MOV, AVI, WebM - Max 100MB")}
+                        </p>
                         <div className="mx-auto mt-3 max-w-sm rounded-md border border-border/70 bg-background/80 px-3 py-2 text-xs leading-5 text-muted-foreground">
-                          Best results: one exchange clip, around 30s.
+                          {t("建议上传约 30 秒的单回合片段，分析效果更好。", "Best results: one exchange clip, around 30s.")}
                         </div>
                         <input
                           ref={fileInputRef}
@@ -3494,7 +3633,9 @@ function AnalyzeContent() {
                         <div className="mb-4">
                           <div className="mb-2 flex justify-between text-sm">
                             <span className="font-medium text-muted-foreground">
-                              {videoFile.status === "uploading" ? "Uploading..." : "Analyzing..."}
+                              {videoFile.status === "uploading"
+                                ? t("上传中...", "Uploading...")
+                                : t("分析中...", "Analyzing...")}
                             </span>
                             <span className="font-semibold text-red-600">{Math.round(videoFile.progress)}%</span>
                           </div>
@@ -3514,24 +3655,26 @@ function AnalyzeContent() {
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                             </svg>
                             <span className="font-medium">
-                              {analysisMode === "pose" ? "Pose Analysis Complete" : "Analysis Complete"}
+                              {analysisMode === "pose"
+                                ? t("姿态分析完成", "Pose Analysis Complete")
+                                : t("分析完成", "Analysis Complete")}
                             </span>
                           </div>
 
                           {analysisMode === "pose" && poseResult && (
                             <div className="space-y-4 rounded-2xl border border-border bg-card p-5">
-                              <h4 className="font-semibold">Pose Analysis Results</h4>
+                              <h4 className="font-semibold">{t("姿态分析结果", "Pose Analysis Results")}</h4>
                               <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
                                 <div className="rounded-xl bg-red-50 p-3 dark:bg-red-900/20">
-                                  <p className="text-xs text-muted-foreground">Total Frames</p>
+                                  <p className="text-xs text-muted-foreground">{t("总帧数", "Total Frames")}</p>
                                   <p className="text-lg font-bold text-red-600">{poseResult.total_frames}</p>
                                 </div>
                                 <div className="rounded-xl bg-amber-50 p-3 dark:bg-amber-900/20">
-                                  <p className="text-xs text-muted-foreground">Processed</p>
+                                  <p className="text-xs text-muted-foreground">{t("已处理", "Processed")}</p>
                                   <p className="text-lg font-bold text-amber-600">{poseResult.processed_frames}</p>
                                 </div>
                                 <div className="rounded-xl bg-emerald-50 p-3 dark:bg-emerald-900/20">
-                                  <p className="text-xs text-muted-foreground">Coverage</p>
+                                  <p className="text-xs text-muted-foreground">{t("覆盖率", "Coverage")}</p>
                                   <p className="text-lg font-bold text-emerald-600">
                                     {poseResult.total_frames > 0
                                       ? `${Math.round((poseResult.processed_frames / poseResult.total_frames) * 100)}%`
@@ -3542,17 +3685,20 @@ function AnalyzeContent() {
                               <div className="rounded-xl border border-border bg-background/70 p-4">
                                 <div className="mb-3">
                                   <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-                                    Replay
+                                    {t("回放", "Replay")}
                                   </p>
                                   <p className="mt-1 text-sm text-muted-foreground">
-                                    Use the skeleton replay for visual review. Raw pose JSON is hidden from end users.
+                                    {t(
+                                      "可使用骨架回放进行可视化复盘，原始姿态 JSON 默认不直接展示。",
+                                      "Use the skeleton replay for visual review. Raw pose JSON is hidden from end users.",
+                                    )}
                                   </p>
                                 </div>
                                 <Link
                                   href={videoFile?.id ? `/history/${videoFile.id}?view=skeleton` : "/history"}
                                   className="hover-lift inline-flex w-full items-center justify-center rounded-xl bg-red-600 px-4 py-3 text-center font-medium text-white transition-colors hover:bg-red-700"
                                 >
-                                  Open Full History View
+                                  {t("打开完整历史详情", "Open Full History View")}
                                 </Link>
                               </div>
                             </div>
@@ -3565,7 +3711,7 @@ function AnalyzeContent() {
                           <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                           </svg>
-                          <span>Upload failed. Please try again.</span>
+                          <span>{t("上传失败，请重试。", "Upload failed. Please try again.")}</span>
                         </div>
                       )}
                     </div>
@@ -3583,9 +3729,11 @@ function AnalyzeContent() {
                               d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
                             />
                           </svg>
-                          Analysis Mode
+                          {t("分析模式", "Analysis Mode")}
                         </h4>
-                        <p className="mt-1 text-xs text-muted-foreground">Choose how this upload is processed.</p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {t("选择这次上传的分析方式。", "Choose how this upload is processed.")}
+                        </p>
                       </div>
 
                       <div className="space-y-3">
@@ -3606,8 +3754,10 @@ function AnalyzeContent() {
                             <div className="flex items-center gap-3">
                               <span className="text-2xl">{mode.icon}</span>
                               <div>
-                                <p className="font-medium">{mode.label}</p>
-                                <p className="text-xs text-muted-foreground">{mode.description}</p>
+                                <p className="font-medium">{isZh ? mode.labelZh : mode.labelEn}</p>
+                                <p className="text-xs text-muted-foreground">
+                                  {isZh ? mode.descriptionZh : mode.descriptionEn}
+                                </p>
                               </div>
                             </div>
                           </button>
@@ -3621,9 +3771,11 @@ function AnalyzeContent() {
                           <svg className="h-5 w-5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                           </svg>
-                          Weapon Type
+                          {t("武器类型", "Weapon Type")}
                         </h4>
-                        <p className="mt-1 text-xs text-muted-foreground">Used as context for analysis and coaching prompts.</p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {t("将用于分析与教练问答的上下文。", "Used as context for analysis and coaching prompts.")}
+                        </p>
                       </div>
 
                       <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 md:grid-cols-1 xl:grid-cols-3">
@@ -3642,7 +3794,7 @@ function AnalyzeContent() {
                             }}
                           >
                             <span className={`font-medium ${selectedWeapon === weapon.value ? "text-white" : ""}`}>
-                              {weapon.label}
+                              {isZh ? getWeaponLabel(weapon.value, true) : weapon.label}
                             </span>
                           </button>
                         ))}
@@ -3650,7 +3802,7 @@ function AnalyzeContent() {
 
                       <div className="mt-4 rounded-2xl border border-border/70 bg-background/40 p-4">
                         <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-                          Selected profile
+                          {t("已选配置", "Selected profile")}
                         </p>
                         <div className="mt-2 flex items-center gap-2">
                           <span className={`h-2.5 w-2.5 rounded-full ${selectedWeaponStyle.bg}`} />
@@ -3674,73 +3826,78 @@ function AnalyzeContent() {
                     >
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                     </svg>
-                    <span className="font-medium">{showMetadataForm ? "Hide" : "Show"} match details (optional)</span>
+                    <span className="font-medium">
+                      {showMetadataForm
+                        ? t("隐藏", "Hide")
+                        : t("显示", "Show")}{" "}
+                      {t("对局信息（可选）", "match details (optional)")}
+                    </span>
                   </button>
 
                   {showMetadataForm && (
                     <div className="glass-card space-y-6 rounded-3xl p-6">
-                      <h4 className="text-lg font-semibold">Match Details</h4>
+                      <h4 className="text-lg font-semibold">{t("对局信息", "Match Details")}</h4>
                       <div className="grid gap-4 md:grid-cols-2">
                         <div>
-                          <label className="mb-2 block text-sm text-muted-foreground">Title</label>
+                          <label className="mb-2 block text-sm text-muted-foreground">{t("标题", "Title")}</label>
                           <input
                             type="text"
                             value={metadata.title}
                             onChange={(e) => setMetadata({ ...metadata, title: e.target.value })}
-                            placeholder="e.g., 2024 Regional Championship Final"
+                            placeholder={t("例如：2024 区域锦标赛决赛", "e.g., 2024 Regional Championship Final")}
                             className="w-full rounded-xl border border-border bg-background p-3"
                           />
                         </div>
                         <div>
-                          <label className="mb-2 block text-sm text-muted-foreground">Athlete</label>
+                          <label className="mb-2 block text-sm text-muted-foreground">{t("运动员", "Athlete")}</label>
                           <input
                             type="text"
                             value={metadata.athlete}
                             onChange={(e) => setMetadata({ ...metadata, athlete: e.target.value })}
-                            placeholder="Your name"
+                            placeholder={t("你的姓名", "Your name")}
                             className="w-full rounded-xl border border-border bg-background p-3"
                           />
                         </div>
                         <div>
-                          <label className="mb-2 block text-sm text-muted-foreground">Opponent</label>
+                          <label className="mb-2 block text-sm text-muted-foreground">{t("对手", "Opponent")}</label>
                           <input
                             type="text"
                             value={metadata.opponent}
                             onChange={(e) => setMetadata({ ...metadata, opponent: e.target.value })}
-                            placeholder="Opponent name"
+                            placeholder={t("对手姓名", "Opponent name")}
                             className="w-full rounded-xl border border-border bg-background p-3"
                           />
                         </div>
                         <div>
-                          <label className="mb-2 block text-sm text-muted-foreground">Tournament</label>
+                          <label className="mb-2 block text-sm text-muted-foreground">{t("赛事", "Tournament")}</label>
                           <input
                             type="text"
                             value={metadata.tournament}
                             onChange={(e) => setMetadata({ ...metadata, tournament: e.target.value })}
-                            placeholder="e.g., National Championships"
+                            placeholder={t("例如：全国锦标赛", "e.g., National Championships")}
                             className="w-full rounded-xl border border-border bg-background p-3"
                           />
                         </div>
                         <div>
-                          <label className="mb-2 block text-sm text-muted-foreground">Match Result</label>
+                          <label className="mb-2 block text-sm text-muted-foreground">{t("比赛结果", "Match Result")}</label>
                           <select
                             value={metadata.matchResult}
                             onChange={(e) => setMetadata({ ...metadata, matchResult: e.target.value })}
                             className="w-full rounded-xl border border-border bg-background p-3"
                           >
-                            <option value="">Select result</option>
-                            <option value="win">Win</option>
-                            <option value="loss">Loss</option>
-                            <option value="draw">Draw</option>
+                            <option value="">{t("选择结果", "Select result")}</option>
+                            <option value="win">{t("胜", "Win")}</option>
+                            <option value="loss">{t("负", "Loss")}</option>
+                            <option value="draw">{t("平", "Draw")}</option>
                           </select>
                         </div>
                         <div>
-                          <label className="mb-2 block text-sm text-muted-foreground">Score</label>
+                          <label className="mb-2 block text-sm text-muted-foreground">{t("比分", "Score")}</label>
                           <input
                             type="text"
                             value={metadata.score}
                             onChange={(e) => setMetadata({ ...metadata, score: e.target.value })}
-                            placeholder="e.g., 15-12"
+                            placeholder={t("例如：15-12", "e.g., 15-12")}
                             className="w-full rounded-xl border border-border bg-background p-3"
                           />
                         </div>
@@ -3749,7 +3906,7 @@ function AnalyzeContent() {
                   )}
 
                   <div className="rounded-lg border border-border/70 bg-background/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
-                    Tip: use a single exchange clip around 30s.
+                    {t("建议：上传约 30 秒的单回合视频，结果更稳定。", "Tip: use a single exchange clip around 30s.")}
                   </div>
 
                   <button
@@ -3759,12 +3916,12 @@ function AnalyzeContent() {
                     className="hover-lift w-full rounded-2xl bg-red-600 py-5 text-lg font-semibold text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {videoFile?.status === "uploading"
-                      ? "Uploading..."
+                      ? t("上传中...", "Uploading...")
                       : videoFile?.status === "processing"
-                        ? "Analyzing..."
+                        ? t("分析中...", "Analyzing...")
                         : videoFile
-                          ? "Start Analysis"
-                          : "Select a video to start"}
+                          ? t("开始分析", "Start Analysis")
+                          : t("请先选择视频", "Select a video to start")}
                   </button>
 
                   {uploadError && (
@@ -3798,7 +3955,42 @@ function AnalyzeContent() {
                           {message.role === "user" ? (
                             <p className="whitespace-pre-wrap text-sm leading-relaxed">{message.content}</p>
                           ) : (
-                            <ChatMarkdown content={message.content} />
+                            <div>
+                              <ChatMarkdown content={message.content} />
+                              {(message.citations?.length || message.retrievalMeta?.degraded) && (
+                                <div className="mt-4 border-t border-border/60 pt-3 text-xs text-muted-foreground">
+                                  {message.citations?.length ? (
+                                    <div className="space-y-2">
+                                      <p className="font-semibold text-foreground">{t("知识证据", "Knowledge Evidence")}</p>
+                                      {message.citations.map((citation, citationIndex) => (
+                                        <div
+                                          key={`${citation.chunk_id}-${citationIndex}`}
+                                          className="rounded-xl border border-border/70 bg-background/60 px-3 py-2"
+                                        >
+                                          <div className="flex flex-wrap items-center gap-2">
+                                            <span className="rounded-full bg-red-50 px-2 py-0.5 font-semibold text-red-600">
+                                              {`K${citationIndex + 1}`}
+                                            </span>
+                                            <span className="font-medium text-foreground">{citation.title}</span>
+                                            <span>{`${t("分数", "score")} ${citation.score.toFixed(2)}`}</span>
+                                          </div>
+                                          <p className="mt-1 max-h-24 overflow-hidden whitespace-pre-wrap">
+                                            {citation.snippet}
+                                          </p>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : null}
+                                  {message.retrievalMeta?.degraded ? (
+                                    <p className="mt-2 text-amber-600">
+                                      {`${t("RAG 回退：", "RAG fallback: ")}${
+                                        message.retrievalMeta.degrade_reason || t("检索降级", "retrieval degraded")
+                                      }`}
+                                    </p>
+                                  ) : null}
+                                </div>
+                              )}
+                            </div>
                           )}
                         </div>
                       </div>
@@ -3822,7 +4014,7 @@ function AnalyzeContent() {
                         <span
                           className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-semibold ${activeChatSessionMeta.badgeClass}`}
                         >
-                          {activeChatSessionMeta.label}
+                          {activeChatSessionLabel}
                         </span>
                         <p className="truncate text-sm font-semibold text-foreground">
                           {activeChatSessionTitle}
@@ -3837,12 +4029,12 @@ function AnalyzeContent() {
                       onClick={handleNewChatSession}
                       className="rounded-full border border-border px-3 py-1 text-xs font-semibold transition-colors hover:border-red-300 hover:text-red-600"
                     >
-                      New Session
+                      {t("新建会话", "New Session")}
                     </button>
                   </div>
 
                   <div className="mb-4 flex flex-wrap gap-2">
-                    {(chatSuggestedPrompts.length ? chatSuggestedPrompts : DEFAULT_QUICK_PROMPTS).map((prompt) => (
+                    {(chatSuggestedPrompts.length ? chatSuggestedPrompts : defaultQuickPrompts).map((prompt) => (
                       <button
                         key={prompt}
                         type="button"
@@ -3860,7 +4052,7 @@ function AnalyzeContent() {
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
                         onKeyDown={handleComposerKeyDown}
-                        placeholder="输入你的问题..."
+                        placeholder={t("输入你的问题...", "Type your question...")}
                         rows={2}
                         className="min-h-[72px] flex-1 resize-none bg-transparent px-2 py-1 text-lg leading-7 text-foreground placeholder:text-muted-foreground focus:outline-none"
                       />
@@ -3869,7 +4061,7 @@ function AnalyzeContent() {
                         onClick={handleSend}
                         disabled={!input.trim() || isTyping}
                         className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-600 text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-45"
-                        aria-label="Send"
+                        aria-label={t("发送", "Send")}
                       >
                         <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.4} d="M5 12h14m-6-6 6 6-6 6" />
@@ -3877,24 +4069,28 @@ function AnalyzeContent() {
                       </button>
                     </div>
                     <div className="mt-2 flex items-center justify-end text-[11px] font-medium text-muted-foreground">
-                      <span>Press Enter to send · Shift + Enter for a new line</span>
+                      <span>{t("Enter 发送 · Shift + Enter 换行", "Press Enter to send · Shift + Enter for a new line")}</span>
                     </div>
                   </div>
 
                   <div className="mt-3 rounded-lg border border-border/60 bg-background/70 px-3 py-2">
                     <p className="text-center text-xs leading-5 text-muted-foreground">
-                      AI suggestions are for reference only.
+                      {t("AI 建议仅供训练参考。", "AI suggestions are for reference only.")}
                     </p>
                     {externalContextStatus && !activeChatVideoId ? (
                       <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                        Current source: {externalContextStatus.label} ({externalContextStatus.window})
+                        {t("当前来源：", "Current source: ")}
+                        {externalContextStatus.label} ({externalContextStatus.window})
                       </p>
                     ) : null}
                     {isContextPreparing ? (
                       <p className="mt-1 text-xs leading-5 text-muted-foreground">
                         {pendingQueuedMessage
-                          ? "Preparing video context... Your message will send automatically when ready."
-                          : "Preparing video context..."}
+                          ? t(
+                              "正在准备视频上下文... 准备完成后会自动发送你的消息。",
+                              "Preparing video context... Your message will send automatically when ready.",
+                            )
+                          : t("正在准备视频上下文...", "Preparing video context...")}
                       </p>
                     ) : null}
                   </div>
@@ -3905,9 +4101,12 @@ function AnalyzeContent() {
                 <div className="space-y-5">
                   {!selectedHistoryVideoId && (
                     <div className="glass-card rounded-3xl border border-dashed border-border p-8 text-center">
-                      <h3 className="mb-2 text-xl font-semibold">Select a history record</h3>
+                      <h3 className="mb-2 text-xl font-semibold">{t("选择一条历史记录", "Select a history record")}</h3>
                       <p className="text-muted-foreground">
-                        Choose a video from the left sidebar to view pose analysis and report details here.
+                        {t(
+                          "从左侧会话中选择一个视频，即可在这里查看姿态分析和报告详情。",
+                          "Choose a video from the left sidebar to view pose analysis and report details here.",
+                        )}
                       </p>
                     </div>
                   )}
@@ -3917,7 +4116,7 @@ function AnalyzeContent() {
                       <div className="flex items-center justify-center py-20">
                         <div className="flex flex-col items-center gap-3">
                           <div className="h-10 w-10 animate-spin rounded-full border-4 border-red-500 border-t-transparent" />
-                          <p className="text-sm text-muted-foreground">Loading history detail...</p>
+                          <p className="text-sm text-muted-foreground">{t("加载历史详情中...", "Loading history detail...")}</p>
                         </div>
                       </div>
                     </div>
@@ -3931,7 +4130,7 @@ function AnalyzeContent() {
                         onClick={() => void loadHistoryDetail(selectedHistoryVideoId)}
                         className="mt-3 rounded-xl border border-red-300 px-3 py-1.5 text-sm font-semibold hover:bg-red-100"
                       >
-                        Retry
+                        {t("重试", "Retry")}
                       </button>
                     </div>
                   )}
@@ -3941,10 +4140,11 @@ function AnalyzeContent() {
                       <div className="glass-card rounded-3xl p-6">
                         <div className="flex flex-wrap items-start justify-between gap-4">
                           <div>
-                            <p className="text-sm text-muted-foreground">Selected Match</p>
-                            <h2 className="mt-1 text-2xl font-bold">{historyDetail.title || "Untitled Video"}</h2>
+                            <p className="text-sm text-muted-foreground">{t("已选对局", "Selected Match")}</p>
+                            <h2 className="mt-1 text-2xl font-bold">{historyDetail.title || t("未命名视频", "Untitled Video")}</h2>
                             <p className="mt-1 text-sm text-muted-foreground">
-                              Uploaded {formatRelativeTime(historyDetail.upload_time)}
+                              {isZh ? "上传于 " : "Uploaded "}
+                              {formatRelativeTime(historyDetail.upload_time, isZh)}
                             </p>
                           </div>
                           <div className="flex flex-wrap items-center gap-2">
@@ -3952,14 +4152,14 @@ function AnalyzeContent() {
                               href={`/history/${selectedHistoryVideoId}`}
                               className="rounded-full border border-border bg-card px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-red-300 hover:bg-muted"
                             >
-                              Open Full History Page
+                              {t("打开完整历史页", "Open Full History Page")}
                             </Link>
                             <button
                               type="button"
                               onClick={handleAskAiAboutHistory}
                               className="rounded-full bg-red-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-700"
                             >
-                              Ask AI About This Match
+                              {t("就这场对局向 AI 提问", "Ask AI About This Match")}
                             </button>
                             <span
                               className="rounded-full px-3 py-1 text-sm font-semibold"
@@ -3968,35 +4168,37 @@ function AnalyzeContent() {
                                 color: getWeaponColor(historyDetail.weapon),
                               }}
                             >
-                              {getWeaponLabel(historyDetail.weapon)}
+                              {getWeaponLabel(historyDetail.weapon, isZh)}
                             </span>
                           </div>
                         </div>
 
                         <div className="mt-5 grid gap-4 md:grid-cols-3">
                           <div className="rounded-2xl border border-border bg-card p-4">
-                            <p className="text-xs uppercase tracking-wide text-muted-foreground">Athlete</p>
-                            <p className="mt-1 font-semibold">{historyDetail.athlete || "Unknown"}</p>
+                            <p className="text-xs uppercase tracking-wide text-muted-foreground">{t("运动员", "Athlete")}</p>
+                            <p className="mt-1 font-semibold">{historyDetail.athlete || t("未知", "Unknown")}</p>
                           </div>
                           <div className="rounded-2xl border border-border bg-card p-4">
-                            <p className="text-xs uppercase tracking-wide text-muted-foreground">Opponent</p>
-                            <p className="mt-1 font-semibold">{historyDetail.opponent || "Unknown"}</p>
+                            <p className="text-xs uppercase tracking-wide text-muted-foreground">{t("对手", "Opponent")}</p>
+                            <p className="mt-1 font-semibold">{historyDetail.opponent || t("未知", "Unknown")}</p>
                           </div>
                           <div className="rounded-2xl border border-border bg-card p-4">
-                            <p className="text-xs uppercase tracking-wide text-muted-foreground">Tournament</p>
-                            <p className="mt-1 font-semibold">{historyDetail.tournament || "Not set"}</p>
+                            <p className="text-xs uppercase tracking-wide text-muted-foreground">{t("赛事", "Tournament")}</p>
+                            <p className="mt-1 font-semibold">{historyDetail.tournament || t("未设置", "Not set")}</p>
                           </div>
                         </div>
 
                         <div className="mt-4 flex flex-wrap items-center gap-3">
-                          {getResultLabel(historyDetail.match_result) && (
+                          {getResultLabel(historyDetail.match_result, isZh) && (
                             <span className="rounded-full bg-secondary px-3 py-1 text-xs font-semibold text-secondary-foreground">
-                              Result: {getResultLabel(historyDetail.match_result)}
+                              {isZh ? "结果：" : "Result: "}
+                              {getResultLabel(historyDetail.match_result, isZh)}
                             </span>
                           )}
                           {historyDetail.score && (
                             <span className="rounded-full bg-secondary px-3 py-1 font-mono text-xs text-secondary-foreground">
-                              Score: {historyDetail.score}
+                              {t("比分：", "Score: ")}
+                              {historyDetail.score}
                             </span>
                           )}
                         </div>
@@ -4005,10 +4207,12 @@ function AnalyzeContent() {
                       <div className="glass-card rounded-3xl p-6">
                         <div className="mb-4 flex items-center justify-between gap-3">
                           <div>
-                            <h3 className="text-lg font-semibold">AI Analysis Report</h3>
+                            <h3 className="text-lg font-semibold">{t("AI 分析报告", "AI Analysis Report")}</h3>
                             {historyPoseData ? (
                               <p className="mt-1 text-xs text-muted-foreground">
-                                Current report target: {getAthleteSlotLabel(selectedHistoryAthleteSlot)}. Switching athlete only loads saved reports.
+                                {t("当前报告对象：", "Current report target: ")}
+                                {getAthleteSlotLabel(selectedHistoryAthleteSlot)}
+                                {t("。切换对象只会加载已保存报告。", ". Switching athlete only loads saved reports.")}
                               </p>
                             ) : null}
                           </div>
@@ -4038,7 +4242,9 @@ function AnalyzeContent() {
                           <div className="flex items-center gap-3 rounded-xl border border-border bg-card p-4">
                             <div className="h-5 w-5 animate-spin rounded-full border-2 border-red-500 border-t-transparent" />
                             <p className="text-sm text-muted-foreground">
-                              {historyReportAction === "generate" ? "Generating report..." : "Loading saved report..."}
+                              {historyReportAction === "generate"
+                                ? t("正在生成报告...", "Generating report...")
+                                : t("正在加载已保存报告...", "Loading saved report...")}
                             </p>
                           </div>
                         )}
@@ -4053,15 +4259,20 @@ function AnalyzeContent() {
                           <div className="rounded-2xl border border-border bg-card p-4">
                             <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                               <span className="rounded-full bg-secondary px-2.5 py-1">
-                                {historyReport.cached ? "Cached report" : "Saved report"}
+                                {historyReport.cached ? t("缓存报告", "Cached report") : t("已保存报告", "Saved report")}
                               </span>
-                              <span>Updated {formatRelativeTime(historyReport.updated_at)}</span>
+                              <span>
+                                {isZh ? "更新于 " : "Updated "}
+                                {formatRelativeTime(historyReport.updated_at, isZh)}
+                              </span>
                             </div>
                             <ReportMarkdown content={historyReport.report} summary={historyReport.summary} />
                             {historyPoseData && (
                               <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
                                 <p className="text-xs text-muted-foreground">
-                                  Need a fresh pass for {getAthleteSlotLabel(selectedHistoryAthleteSlot)}?
+                                  {t("是否为以下对象重新分析：", "Need a fresh pass for ")}
+                                  {getAthleteSlotLabel(selectedHistoryAthleteSlot)}
+                                  {isZh ? "？" : "?"}
                                 </p>
                                 <button
                                   type="button"
@@ -4070,8 +4281,10 @@ function AnalyzeContent() {
                                   className="rounded-xl bg-red-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
                                 >
                                   {historyReportLoading && historyReportAction === "generate"
-                                    ? "Regenerating..."
-                                    : `Regenerate ${getAthleteSlotShortLabel(selectedHistoryAthleteSlot)} Report`}
+                                    ? t("重新生成中...", "Regenerating...")
+                                    : isZh
+                                      ? `重新生成 ${getAthleteSlotShortLabel(selectedHistoryAthleteSlot)} 报告`
+                                      : `Regenerate ${getAthleteSlotShortLabel(selectedHistoryAthleteSlot)} Report`}
                                 </button>
                               </div>
                             )}
@@ -4080,14 +4293,16 @@ function AnalyzeContent() {
 
                         {!historyReport && !historyReportLoading && !historyReportError && !historyPoseData && (
                           <div className="rounded-xl border border-border bg-muted/40 p-4 text-sm text-muted-foreground">
-                            No pose data available for this video yet. Run pose analysis first.
+                            {t("该视频暂无姿态数据，请先执行姿态分析。", "No pose data available for this video yet. Run pose analysis first.")}
                           </div>
                         )}
 
                         {!historyReport && !historyReportLoading && !historyReportError && historyPoseData && (
                           <div className="rounded-xl border border-border bg-card p-4">
                             <p className="text-sm text-muted-foreground">
-                              No saved report found for {getAthleteSlotLabel(selectedHistoryAthleteSlot)}.
+                              {t("未找到以下对象的已保存报告：", "No saved report found for ")}
+                              {getAthleteSlotLabel(selectedHistoryAthleteSlot)}
+                              {isZh ? "。" : "."}
                             </p>
                             <div className="mt-3">
                               <button
@@ -4096,7 +4311,9 @@ function AnalyzeContent() {
                                 disabled={historyReportLoading}
                                 className="rounded-xl bg-red-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
                               >
-                                Generate {getAthleteSlotShortLabel(selectedHistoryAthleteSlot)} Report
+                                {isZh
+                                  ? `生成 ${getAthleteSlotShortLabel(selectedHistoryAthleteSlot)} 报告`
+                                  : `Generate ${getAthleteSlotShortLabel(selectedHistoryAthleteSlot)} Report`}
                               </button>
                             </div>
                           </div>
@@ -4117,14 +4334,16 @@ function AnalyzeContent() {
             type="button"
             className="absolute inset-0 bg-black/50 backdrop-blur-sm"
             onClick={() => setIsMobileSidebarOpen(false)}
-            aria-label="Close history drawer"
+            aria-label={t("关闭历史抽屉", "Close history drawer")}
           />
 
           <div className="absolute inset-y-0 left-0 flex w-[88%] max-w-sm flex-col border-r border-border bg-background p-4 shadow-2xl">
             <div className="mb-4 flex items-center justify-between">
               <div>
-                <p className="text-sm font-semibold">Sessions</p>
-                <p className="text-xs text-muted-foreground">{chatSessions.length} threads</p>
+                <p className="text-sm font-semibold">{t("会话", "Sessions")}</p>
+                <p className="text-xs text-muted-foreground">
+                  {isZh ? `${chatSessions.length} 个线程` : `${chatSessions.length} threads`}
+                </p>
               </div>
               <button
                 type="button"
@@ -4142,7 +4361,7 @@ function AnalyzeContent() {
                 type="text"
                 value={sessionSearch}
                 onChange={(e) => setSessionSearch(e.target.value)}
-                placeholder="Search session..."
+                placeholder={t("搜索会话...", "Search session...")}
                 className="w-full rounded-xl border border-border bg-card px-3 py-2 text-sm"
               />
             </div>
@@ -4156,7 +4375,7 @@ function AnalyzeContent() {
                 }}
                 className="w-full rounded-full border border-border bg-card px-3 py-2 text-xs font-semibold transition-colors hover:border-red-300 hover:text-red-600"
               >
-                New Session
+                {t("新建会话", "New Session")}
               </button>
             </div>
 

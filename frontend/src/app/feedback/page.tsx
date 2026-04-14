@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { authFetch } from "@/lib/api";
 import { TopNav } from "@/components/top-nav";
+import { useLocale } from "@/lib/locale";
 
 const FEEDBACK_NAV_LINKS = [
   { href: "/analyze", label: "Analyze" },
@@ -13,6 +14,7 @@ const FEEDBACK_NAV_LINKS = [
 ] as const;
 
 export default function FeedbackPage() {
+  const { isZh } = useLocale();
   const [category, setCategory] = useState("general");
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
@@ -42,10 +44,10 @@ export default function FeedbackPage() {
         setSubmitted(true);
       } else {
         const data = await response.json();
-        setError(data.detail || "Failed to submit feedback");
+        setError(data.detail || (isZh ? "提交反馈失败" : "Failed to submit feedback"));
       }
     } catch {
-      setError("An error occurred");
+      setError(isZh ? "发生错误，请稍后重试" : "An error occurred");
     } finally {
       setIsLoading(false);
     }
@@ -71,15 +73,17 @@ export default function FeedbackPage() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                 </svg>
               </div>
-              <h2 className="text-2xl font-bold mb-2">Feedback Submitted!</h2>
+              <h2 className="text-2xl font-bold mb-2">{isZh ? "反馈已提交！" : "Feedback Submitted!"}</h2>
               <p className="text-muted-foreground mb-6">
-                Thank you for your feedback. We will review it shortly.
+                {isZh
+                  ? "感谢你的反馈，我们会尽快查看。"
+                  : "Thank you for your feedback. We will review it shortly."}
               </p>
               <Link
                 href="/"
                 className="inline-block px-6 py-3 rounded-xl bg-gradient-to-r from-red-600 to-red-700 text-white font-medium hover:shadow-lg hover:shadow-red-500/30 transition-all"
               >
-                Back to Home
+                {isZh ? "返回首页" : "Back to Home"}
               </Link>
             </div>
           </div>
@@ -104,7 +108,7 @@ export default function FeedbackPage() {
         <div className="max-w-2xl mx-auto px-6">
           <div className="text-center mb-8">
             <h1 className="text-3xl font-bold mb-2">Feedback</h1>
-            <p className="text-muted-foreground">Help us improve Engarde AI</p>
+            <p className="text-muted-foreground">{isZh ? "帮助我们改进 Engarde AI" : "Help us improve Engarde AI"}</p>
           </div>
 
           {error && (
@@ -116,12 +120,12 @@ export default function FeedbackPage() {
           <div className="glass-card rounded-3xl p-8">
             <form onSubmit={handleSubmit} className="space-y-5">
               <div>
-                <label className="block text-sm font-medium mb-2">Category</label>
+                <label className="block text-sm font-medium mb-2">{isZh ? "类别" : "Category"}</label>
                 <div className="grid grid-cols-3 gap-3">
                   {[
-                    { value: "bug", label: "Bug Report", icon: "🐛" },
-                    { value: "feature", label: "Feature Request", icon: "💡" },
-                    { value: "general", label: "General", icon: "💬" },
+                    { value: "bug", label: isZh ? "问题反馈" : "Bug Report", icon: "🐛" },
+                    { value: "feature", label: isZh ? "功能建议" : "Feature Request", icon: "💡" },
+                    { value: "general", label: isZh ? "其他" : "General", icon: "💬" },
                   ].map((cat) => (
                     <button
                       key={cat.value}
@@ -142,7 +146,7 @@ export default function FeedbackPage() {
 
               <div>
                 <label htmlFor="title" className="block text-sm font-medium mb-2">
-                  Title
+                  {isZh ? "标题" : "Title"}
                 </label>
                 <input
                   id="title"
@@ -152,13 +156,13 @@ export default function FeedbackPage() {
                   required
                   maxLength={200}
                   className="w-full px-4 py-3 rounded-xl bg-muted/50 border border-border focus:border-red-500 focus:ring-2 focus:ring-red-500/20 outline-none transition-all"
-                  placeholder="Brief summary of your feedback"
+                  placeholder={isZh ? "请简要描述反馈内容" : "Brief summary of your feedback"}
                 />
               </div>
 
               <div>
                 <label htmlFor="content" className="block text-sm font-medium mb-2">
-                  Details
+                  {isZh ? "详细说明" : "Details"}
                 </label>
                 <textarea
                   id="content"
@@ -167,7 +171,7 @@ export default function FeedbackPage() {
                   required
                   rows={6}
                   className="w-full px-4 py-3 rounded-xl bg-muted/50 border border-border focus:border-red-500 focus:ring-2 focus:ring-red-500/20 outline-none transition-all resize-none"
-                  placeholder="Please describe your feedback in detail..."
+                  placeholder={isZh ? "请详细描述你的反馈..." : "Please describe your feedback in detail..."}
                 />
               </div>
 
@@ -176,13 +180,17 @@ export default function FeedbackPage() {
                 disabled={isLoading}
                 className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-red-600 to-red-700 text-white font-semibold hover:shadow-lg hover:shadow-red-500/30 hover-lift transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {isLoading ? "Submitting..." : "Submit Feedback"}
+                {isLoading ? (isZh ? "提交中..." : "Submitting...") : isZh ? "提交反馈" : "Submit Feedback"}
               </button>
             </form>
           </div>
 
           <div className="mt-6 text-center text-sm text-muted-foreground">
-            <p>We appreciate your feedback and will respond as soon as possible.</p>
+            <p>
+              {isZh
+                ? "我们重视你的反馈，会尽快处理并持续优化。"
+                : "We appreciate your feedback and will respond as soon as possible."}
+            </p>
           </div>
         </div>
       </main>

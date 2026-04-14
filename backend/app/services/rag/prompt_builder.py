@@ -30,6 +30,7 @@ class PromptBuilderService:
             "## Output Rules\n"
             "- Use Chinese and keep advice actionable.\n"
             "- Separate video observations from KB evidence.\n"
+            "- When citing KB evidence, quote the citation id such as [K1] or [K2].\n"
             "- If evidence is insufficient, state uncertainty clearly.\n"
             "- Return with this structure: 结论 / 证据引用 / 训练建议（1周/4周） / 不确定项."
         )

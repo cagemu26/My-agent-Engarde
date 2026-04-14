@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { buildApiUrl } from "@/lib/api";
 import { TopNav } from "@/components/top-nav";
+import { useLocale } from "@/lib/locale";
 
 const ADMIN_NAV_LINKS = [
   { href: "/analyze", label: "Analyze" },
@@ -27,6 +28,7 @@ interface User {
 export default function UsersPage() {
   const { user, token, isLoading } = useAuth();
   const router = useRouter();
+  const { isZh } = useLocale();
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -61,7 +63,7 @@ export default function UsersPage() {
         return;
       }
       if (!response.ok) {
-        throw new Error("Failed to fetch users");
+        throw new Error(isZh ? "获取用户失败" : "Failed to fetch users");
       }
       const data = await response.json();
       if (abortController.signal.aborted || requestId !== usersFetchRequestIdRef.current) {
@@ -77,7 +79,7 @@ export default function UsersPage() {
       ) {
         return;
       }
-      setError(err instanceof Error ? err.message : "An error occurred");
+      setError(err instanceof Error ? err.message : isZh ? "发生错误" : "An error occurred");
     } finally {
       if (requestId === usersFetchRequestIdRef.current) {
         setLoading(false);
@@ -86,7 +88,7 @@ export default function UsersPage() {
         usersFetchAbortRef.current = null;
       }
     }
-  }, [token]);
+  }, [isZh, token]);
 
   useEffect(() => {
     if (user && user.is_admin && token) {
@@ -115,17 +117,17 @@ export default function UsersPage() {
         const data = await response.json();
         throw new Error(data.detail || "Failed to toggle user");
       }
-      setSuccess("User status updated successfully");
+      setSuccess(isZh ? "用户状态更新成功" : "User status updated successfully");
       setTimeout(() => setSuccess(""), 3000);
       await fetchUsers();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "An error occurred");
+      setError(err instanceof Error ? err.message : isZh ? "发生错误" : "An error occurred");
       setTimeout(() => setError(""), 3000);
     }
   };
 
   const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleDateString("en-US", {
+    return new Date(dateString).toLocaleDateString(isZh ? "zh-CN" : "en-US", {
       year: "numeric",
       month: "short",
       day: "numeric",
@@ -160,14 +162,14 @@ export default function UsersPage() {
         <div className="max-w-7xl mx-auto px-6">
           <div className="mb-8 flex items-center justify-between">
             <div>
-              <h1 className="text-3xl font-bold mb-2">User Management</h1>
-              <p className="text-muted-foreground">Manage registered users</p>
+              <h1 className="text-3xl font-bold mb-2">{isZh ? "用户管理" : "User Management"}</h1>
+              <p className="text-muted-foreground">{isZh ? "管理已注册用户" : "Manage registered users"}</p>
             </div>
             <Link
               href="/admin"
               className="rounded-full border border-border bg-card px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-muted"
             >
-              Back to Admin
+              {isZh ? "返回管理后台" : "Back to Admin"}
             </Link>
           </div>
 
@@ -188,12 +190,12 @@ export default function UsersPage() {
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-border">
-                    <th className="text-left p-6 font-medium text-muted-foreground">Username</th>
-                    <th className="text-left p-6 font-medium text-muted-foreground">Email</th>
-                    <th className="text-left p-6 font-medium text-muted-foreground">Status</th>
-                    <th className="text-left p-6 font-medium text-muted-foreground">Admin</th>
-                    <th className="text-left p-6 font-medium text-muted-foreground">Joined</th>
-                    <th className="text-left p-6 font-medium text-muted-foreground">Actions</th>
+                    <th className="text-left p-6 font-medium text-muted-foreground">{isZh ? "用户名" : "Username"}</th>
+                    <th className="text-left p-6 font-medium text-muted-foreground">{isZh ? "邮箱" : "Email"}</th>
+                    <th className="text-left p-6 font-medium text-muted-foreground">{isZh ? "状态" : "Status"}</th>
+                    <th className="text-left p-6 font-medium text-muted-foreground">{isZh ? "角色" : "Admin"}</th>
+                    <th className="text-left p-6 font-medium text-muted-foreground">{isZh ? "注册时间" : "Joined"}</th>
+                    <th className="text-left p-6 font-medium text-muted-foreground">{isZh ? "操作" : "Actions"}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -209,7 +211,7 @@ export default function UsersPage() {
                               : "bg-red-100 text-red-700"
                           }`}
                         >
-                          {u.is_active ? "Active" : "Inactive"}
+                          {u.is_active ? (isZh ? "启用" : "Active") : isZh ? "禁用" : "Inactive"}
                         </span>
                       </td>
                       <td className="p-6">
@@ -220,7 +222,7 @@ export default function UsersPage() {
                               : "bg-gray-100 text-gray-700"
                           }`}
                         >
-                          {u.is_admin ? "Admin" : "User"}
+                          {u.is_admin ? (isZh ? "管理员" : "Admin") : isZh ? "普通用户" : "User"}
                         </span>
                       </td>
                       <td className="p-6 text-muted-foreground">
@@ -236,7 +238,7 @@ export default function UsersPage() {
                                 : "bg-green-100 text-green-700 hover:bg-green-200"
                             }`}
                           >
-                            {u.is_active ? "Deactivate" : "Activate"}
+                            {u.is_active ? (isZh ? "停用" : "Deactivate") : isZh ? "启用" : "Activate"}
                           </button>
                         )}
                       </td>

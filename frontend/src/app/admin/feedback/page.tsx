@@ -7,6 +7,7 @@ import { useAuth } from "@/lib/auth";
 import { buildApiUrl } from "@/lib/api";
 import { TopNav } from "@/components/top-nav";
 import { useAppDialog } from "@/components/app-dialog-provider";
+import { useLocale } from "@/lib/locale";
 
 const ADMIN_NAV_LINKS = [
   { href: "/analyze", label: "Analyze" },
@@ -31,6 +32,7 @@ export default function FeedbackAdminPage() {
   const { user, token, isLoading } = useAuth();
   const { confirm } = useAppDialog();
   const router = useRouter();
+  const { isZh } = useLocale();
   const [feedbacks, setFeedbacks] = useState<Feedback[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -70,7 +72,7 @@ export default function FeedbackAdminPage() {
         return;
       }
       if (!response.ok) {
-        throw new Error("Failed to fetch feedbacks");
+        throw new Error(isZh ? "获取反馈失败" : "Failed to fetch feedbacks");
       }
       const data = await response.json();
       if (abortController.signal.aborted || requestId !== feedbacksFetchRequestIdRef.current) {
@@ -86,7 +88,7 @@ export default function FeedbackAdminPage() {
       ) {
         return;
       }
-      setError(err instanceof Error ? err.message : "An error occurred");
+      setError(err instanceof Error ? err.message : isZh ? "发生错误" : "An error occurred");
     } finally {
       if (requestId === feedbacksFetchRequestIdRef.current) {
         setLoading(false);
@@ -95,7 +97,7 @@ export default function FeedbackAdminPage() {
         feedbacksFetchAbortRef.current = null;
       }
     }
-  }, [filter, token]);
+  }, [filter, isZh, token]);
 
   useEffect(() => {
     if (user && user.is_admin && token) {
@@ -123,20 +125,20 @@ export default function FeedbackAdminPage() {
         body: JSON.stringify({ status }),
       });
       if (!response.ok) {
-        throw new Error("Failed to update feedback");
+        throw new Error(isZh ? "更新反馈失败" : "Failed to update feedback");
       }
       await fetchFeedbacks();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "An error occurred");
+      setError(err instanceof Error ? err.message : isZh ? "发生错误" : "An error occurred");
     }
   };
 
   const deleteFeedback = async (feedbackId: string) => {
     const confirmed = await confirm({
-      title: "Delete feedback?",
-      description: "This action cannot be undone.",
-      confirmText: "Delete",
-      cancelText: "Cancel",
+      title: isZh ? "删除反馈？" : "Delete feedback?",
+      description: isZh ? "此操作不可撤销。" : "This action cannot be undone.",
+      confirmText: isZh ? "删除" : "Delete",
+      cancelText: isZh ? "取消" : "Cancel",
       danger: true,
     });
     if (!confirmed) return;
@@ -149,16 +151,16 @@ export default function FeedbackAdminPage() {
         },
       });
       if (!response.ok) {
-        throw new Error("Failed to delete feedback");
+        throw new Error(isZh ? "删除反馈失败" : "Failed to delete feedback");
       }
       await fetchFeedbacks();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "An error occurred");
+      setError(err instanceof Error ? err.message : isZh ? "发生错误" : "An error occurred");
     }
   };
 
   const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleDateString("en-US", {
+    return new Date(dateString).toLocaleDateString(isZh ? "zh-CN" : "en-US", {
       year: "numeric",
       month: "short",
       day: "numeric",
@@ -169,9 +171,9 @@ export default function FeedbackAdminPage() {
 
   const getCategoryLabel = (category: string) => {
     const labels: Record<string, string> = {
-      bug: "Bug Report",
-      feature: "Feature Request",
-      general: "General",
+      bug: isZh ? "问题反馈" : "Bug Report",
+      feature: isZh ? "功能建议" : "Feature Request",
+      general: isZh ? "一般反馈" : "General",
     };
     return labels[category] || category;
   };
@@ -222,14 +224,16 @@ export default function FeedbackAdminPage() {
         <div className="max-w-7xl mx-auto px-6">
           <div className="mb-8 flex items-center justify-between">
             <div>
-              <h1 className="text-3xl font-bold mb-2">User Feedback</h1>
-              <p className="text-muted-foreground">Manage user feedback and suggestions</p>
+              <h1 className="text-3xl font-bold mb-2">{isZh ? "用户反馈" : "User Feedback"}</h1>
+              <p className="text-muted-foreground">
+                {isZh ? "管理用户反馈与建议" : "Manage user feedback and suggestions"}
+              </p>
             </div>
             <Link
               href="/admin"
               className="rounded-full border border-border bg-card px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-muted"
             >
-              Back to Admin
+              {isZh ? "返回管理后台" : "Back to Admin"}
             </Link>
           </div>
 
@@ -245,7 +249,21 @@ export default function FeedbackAdminPage() {
                     : "bg-muted text-muted-foreground hover:bg-muted/80"
                 }`}
               >
-                {status.charAt(0).toUpperCase() + status.slice(1)}
+                {status === "all"
+                  ? isZh
+                    ? "全部"
+                    : "All"
+                  : status === "pending"
+                    ? isZh
+                      ? "待处理"
+                      : "Pending"
+                    : status === "reviewed"
+                      ? isZh
+                        ? "已查看"
+                        : "Reviewed"
+                      : isZh
+                        ? "已解决"
+                        : "Resolved"}
               </button>
             ))}
           </div>
@@ -267,7 +285,19 @@ export default function FeedbackAdminPage() {
                         {getCategoryLabel(feedback.category)}
                       </span>
                       <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${getStatusColor(feedback.status)}`}>
-                        {feedback.status}
+                        {feedback.status === "pending"
+                          ? isZh
+                            ? "待处理"
+                            : "Pending"
+                          : feedback.status === "reviewed"
+                            ? isZh
+                              ? "已查看"
+                              : "Reviewed"
+                            : feedback.status === "resolved"
+                              ? isZh
+                                ? "已解决"
+                                : "Resolved"
+                              : feedback.status}
                       </span>
                       {feedback.user_email && (
                         <span className="text-sm text-muted-foreground">
@@ -286,7 +316,7 @@ export default function FeedbackAdminPage() {
                         onClick={() => updateStatus(feedback.id, "reviewed")}
                         className="px-4 py-2 rounded-xl bg-blue-100 text-blue-700 text-sm font-medium hover:bg-blue-200 transition-all"
                       >
-                        Mark Reviewed
+                        {isZh ? "标记为已查看" : "Mark Reviewed"}
                       </button>
                     )}
                     {feedback.status === "reviewed" && (
@@ -294,14 +324,14 @@ export default function FeedbackAdminPage() {
                         onClick={() => updateStatus(feedback.id, "resolved")}
                         className="px-4 py-2 rounded-xl bg-green-100 text-green-700 text-sm font-medium hover:bg-green-200 transition-all"
                       >
-                        Mark Resolved
+                        {isZh ? "标记为已解决" : "Mark Resolved"}
                       </button>
                     )}
                     <button
                       onClick={() => deleteFeedback(feedback.id)}
                       className="px-4 py-2 rounded-xl bg-red-100 text-red-700 text-sm font-medium hover:bg-red-200 transition-all"
                     >
-                      Delete
+                      {isZh ? "删除" : "Delete"}
                     </button>
                   </div>
                 </div>
@@ -310,7 +340,7 @@ export default function FeedbackAdminPage() {
 
             {feedbacks.length === 0 && (
               <div className="glass-card rounded-3xl p-12 text-center">
-                <p className="text-muted-foreground">No feedback found</p>
+                <p className="text-muted-foreground">{isZh ? "暂无反馈" : "No feedback found"}</p>
               </div>
             )}
           </div>

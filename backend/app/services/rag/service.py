@@ -4,7 +4,11 @@ from typing import Any, Optional
 import chromadb
 
 from app.core.config import settings
-from app.services.rag.embedding import QianfanEmbeddingProvider
+from app.services.rag.embedding import (
+    BailianEmbeddingProvider,
+    EmbeddingProvider,
+    QianfanEmbeddingProvider,
+)
 from app.services.rag.ingest import KBIngestService
 from app.services.rag.prompt_builder import PromptBuilderService
 from app.services.rag.retrieve import KBRetrievalService
@@ -15,16 +19,19 @@ class RAGService:
     def __init__(self):
         self.enabled = settings.RAG_ENABLED
         self.collection_name = settings.KB_COLLECTION
+        self.repo_root = Path(__file__).resolve().parents[4]
+        configured_data_dir = Path(settings.KB_DATA_DIR)
+        self.default_data_dir_candidates = [configured_data_dir]
+        if not configured_data_dir.is_absolute():
+            repo_relative_candidate = self.repo_root / configured_data_dir
+            if repo_relative_candidate not in self.default_data_dir_candidates:
+                self.default_data_dir_candidates.append(repo_relative_candidate)
 
         chroma_path = Path(settings.CHROMA_PERSIST_DIR)
         chroma_path.mkdir(parents=True, exist_ok=True)
         self.chroma_client = chromadb.PersistentClient(path=str(chroma_path))
 
-        self.embedding_provider = QianfanEmbeddingProvider(
-            api_base=settings.QIANFAN_API_BASE,
-            bearer_token=settings.QIANFAN_BEARER_TOKEN,
-            model=settings.QIANFAN_EMBED_MODEL,
-        )
+        self.embedding_provider = self._build_embedding_provider()
 
         self.ingest_service = KBIngestService(
             chroma_client=self.chroma_client,
@@ -65,7 +72,7 @@ class RAGService:
 
         if not self.embedding_provider.is_available():
             retrieval_meta.degraded = True
-            retrieval_meta.degrade_reason = "missing_qianfan_bearer_token"
+            retrieval_meta.degrade_reason = "missing_embedding_credentials"
             return base_context, [], retrieval_meta.to_dict()
 
         filters = self._normalize_filters(kb_filters)
@@ -94,14 +101,17 @@ class RAGService:
         reindex: bool = False,
     ) -> dict[str, Any]:
         if not self.embedding_provider.is_available():
-            raise RuntimeError("Qianfan bearer token is required for ingest")
+            raise RuntimeError("Embedding provider credentials are required for ingest")
 
-        target_dir = Path(data_dir) if data_dir else Path(settings.KB_DATA_DIR)
+        target_dir, resolution_note = self._resolve_ingest_directory(data_dir)
         if reindex:
             self.ingest_service.reset_collection()
 
         stats = await self.ingest_service.ingest_directory(target_dir)
         stats["reindex"] = reindex
+        stats["resolved_data_dir"] = str(target_dir)
+        if resolution_note:
+            stats.setdefault("warnings", []).append(resolution_note)
         return stats
 
     async def search_knowledge(
@@ -123,7 +133,7 @@ class RAGService:
 
         if not self.embedding_provider.is_available():
             retrieval_meta.degraded = True
-            retrieval_meta.degrade_reason = "missing_qianfan_bearer_token"
+            retrieval_meta.degrade_reason = "missing_embedding_credentials"
             return [], retrieval_meta.to_dict()
 
         try:
@@ -154,6 +164,43 @@ class RAGService:
             if parsed:
                 normalized[key] = parsed
         return normalized
+
+    def _resolve_ingest_directory(self, requested_dir: Optional[str]) -> tuple[Path, Optional[str]]:
+        if requested_dir:
+            return Path(requested_dir), None
+
+        for candidate in self.default_data_dir_candidates:
+            if candidate.exists():
+                return candidate, None
+
+        return self.default_data_dir_candidates[0], None
+
+    def _build_embedding_provider(self) -> EmbeddingProvider:
+        provider_name = settings.EMBEDDING_PROVIDER
+
+        if provider_name == "auto":
+            if settings.BAILIAN_API_KEY.strip():
+                provider_name = "bailian"
+            elif settings.QIANFAN_BEARER_TOKEN.strip():
+                provider_name = "qianfan"
+            else:
+                provider_name = "bailian"
+
+        if provider_name == "bailian":
+            return BailianEmbeddingProvider(
+                api_base=settings.BAILIAN_API_BASE,
+                bearer_token=settings.BAILIAN_API_KEY,
+                model=settings.BAILIAN_EMBED_MODEL,
+                timeout_seconds=settings.EMBEDDING_TIMEOUT_SECONDS,
+                dimensions=settings.BAILIAN_EMBED_DIMENSIONS,
+            )
+
+        return QianfanEmbeddingProvider(
+            api_base=settings.QIANFAN_API_BASE,
+            bearer_token=settings.QIANFAN_BEARER_TOKEN,
+            model=settings.QIANFAN_EMBED_MODEL,
+            timeout_seconds=settings.EMBEDDING_TIMEOUT_SECONDS,
+        )
 
 
 rag_service = RAGService()

@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useAuth } from "@/lib/auth";
 import { BrandLogo } from "@/components/brand-logo";
 import { UserAvatarMenu } from "@/components/user-avatar-menu";
+import { useLocale } from "@/lib/locale";
 
 export interface TopNavLink {
   href: string;
@@ -20,6 +21,25 @@ interface TopNavProps {
 
 type ThemeMode = "light" | "dark";
 const THEME_STORAGE_KEY = "engarde.theme";
+const NAV_LABELS: Record<
+  string,
+  { "zh-CN": string; "en-US": string }
+> = {
+  "/": { "zh-CN": "首页", "en-US": "Home" },
+  "#why": { "zh-CN": "为什么选择 Engarde AI", "en-US": "Why Engarde AI" },
+  "#workflow": { "zh-CN": "使用流程", "en-US": "Workflow" },
+  "#weapon-focus": { "zh-CN": "剑种聚焦", "en-US": "Weapon Focus" },
+  "#contact": { "zh-CN": "联系我们", "en-US": "Contact" },
+  "/analyze": { "zh-CN": "分析", "en-US": "Analyze" },
+  "/training": { "zh-CN": "训练日志", "en-US": "Training Log" },
+  "/history": { "zh-CN": "历史", "en-US": "History" },
+  "/feedback": { "zh-CN": "反馈", "en-US": "Feedback" },
+  "/admin": { "zh-CN": "管理", "en-US": "Admin" },
+  "/demo": { "zh-CN": "演示", "en-US": "Demo" },
+  "/profile": { "zh-CN": "个人资料", "en-US": "Profile" },
+  "/login": { "zh-CN": "登录", "en-US": "Log in" },
+  "/register": { "zh-CN": "注册", "en-US": "Register" },
+};
 
 function ThemeIcon({ theme }: { theme: ThemeMode }) {
   if (theme === "dark") {
@@ -52,9 +72,19 @@ export function TopNav({ activeHref, links, surface = "default" }: TopNavProps) 
   const [theme, setTheme] = useState<ThemeMode>("light");
   const [themeReady, setThemeReady] = useState(false);
   const { user, logout, isLoading } = useAuth();
+  const { locale, setLocale, isZh } = useLocale();
   const isMarketing = surface === "marketing";
+  const t = useCallback(
+    (zh: string, en: string) => (isZh ? zh : en),
+    [isZh],
+  );
 
-  const visibleLinks = links.filter((link) => !link.adminOnly || user?.is_admin);
+  const visibleLinks = links
+    .filter((link) => !link.adminOnly || user?.is_admin)
+    .map((link) => ({
+      ...link,
+      label: NAV_LABELS[link.href]?.[locale] || link.label,
+    }));
   const navSurfaceClass = isMarketing
     ? "bg-background/92 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/86"
     : "bg-background/96 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/90";
@@ -114,6 +144,32 @@ export function TopNav({ activeHref, links, surface = "default" }: TopNavProps) 
         </div>
 
         <div className="hidden items-center gap-2 sm:flex">
+          <div className="inline-flex items-center rounded-full border border-border/80 bg-card p-0.5">
+            <button
+              type="button"
+              onClick={() => setLocale("zh-CN")}
+              aria-label="Switch language to Chinese"
+              className={`rounded-full px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                locale === "zh-CN"
+                  ? "bg-foreground text-background"
+                  : "text-foreground/70 hover:text-foreground"
+              }`}
+            >
+              中
+            </button>
+            <button
+              type="button"
+              onClick={() => setLocale("en-US")}
+              aria-label="Switch language to English"
+              className={`rounded-full px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                locale === "en-US"
+                  ? "bg-foreground text-background"
+                  : "text-foreground/70 hover:text-foreground"
+              }`}
+            >
+              EN
+            </button>
+          </div>
           <button
             type="button"
             onClick={toggleTheme}
@@ -131,7 +187,7 @@ export function TopNav({ activeHref, links, surface = "default" }: TopNavProps) 
                   href="/analyze"
                   className="rounded-full border border-border bg-card px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-muted"
                 >
-                  Open Workspace
+                  {t("进入工作台", "Open Workspace")}
                 </Link>
               ) : null}
               <UserAvatarMenu user={user} onLogout={logout} />
@@ -142,13 +198,13 @@ export function TopNav({ activeHref, links, surface = "default" }: TopNavProps) 
                 href="/login"
                 className="rounded-full px-3 py-2 text-sm font-medium text-foreground/70 transition-colors hover:bg-muted/70 hover:text-foreground"
               >
-                Log in
+                {t("登录", "Log in")}
               </Link>
               <Link
                 href="/register"
                 className="rounded-full bg-red-600 px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-700"
               >
-                Get Started
+                {t("立即开始", "Get Started")}
               </Link>
             </>
           )}
@@ -194,6 +250,30 @@ export function TopNav({ activeHref, links, surface = "default" }: TopNavProps) 
             })}
 
             <div className="mt-2 space-y-2 border-t border-border/60 pt-2">
+              <div className="flex items-center gap-2 px-3.5">
+                <button
+                  type="button"
+                  onClick={() => setLocale("zh-CN")}
+                  className={`rounded-full px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                    locale === "zh-CN"
+                      ? "bg-foreground text-background"
+                      : "text-foreground/70 hover:text-foreground"
+                  }`}
+                >
+                  中
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLocale("en-US")}
+                  className={`rounded-full px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                    locale === "en-US"
+                      ? "bg-foreground text-background"
+                      : "text-foreground/70 hover:text-foreground"
+                  }`}
+                >
+                  EN
+                </button>
+              </div>
               <button
                 type="button"
                 onClick={toggleTheme}
@@ -202,7 +282,11 @@ export function TopNav({ activeHref, links, surface = "default" }: TopNavProps) 
                 <span className="text-foreground/80">
                   <ThemeIcon theme={theme} />
                 </span>
-                <span>Switch to {theme === "dark" ? "Light" : "Dark"} mode</span>
+                <span>
+                  {isZh
+                    ? `切换到${theme === "dark" ? "浅色" : "深色"}模式`
+                    : `Switch to ${theme === "dark" ? "Light" : "Dark"} mode`}
+                </span>
               </button>
               {isLoading ? (
                 <div className="h-9 w-32 animate-pulse rounded-full bg-muted" />
@@ -214,7 +298,7 @@ export function TopNav({ activeHref, links, surface = "default" }: TopNavProps) 
                       onClick={() => setMobileOpen(false)}
                       className="mb-2 block rounded-xl border border-border bg-card px-3.5 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-muted"
                     >
-                      Open Workspace
+                      {t("进入工作台", "Open Workspace")}
                     </Link>
                   ) : null}
                   <UserAvatarMenu
@@ -236,14 +320,14 @@ export function TopNav({ activeHref, links, surface = "default" }: TopNavProps) 
                     onClick={() => setMobileOpen(false)}
                     className="block rounded-xl px-3.5 py-2.5 text-sm font-medium text-foreground/80 hover:bg-muted/70 hover:text-foreground"
                   >
-                    Log in
+                    {t("登录", "Log in")}
                   </Link>
                   <Link
                     href="/register"
                     onClick={() => setMobileOpen(false)}
                     className="block rounded-xl bg-red-600 px-3.5 py-2.5 text-sm font-semibold text-white"
                   >
-                    Get Started
+                    {t("立即开始", "Get Started")}
                   </Link>
                 </>
               )}

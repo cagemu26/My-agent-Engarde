@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { TopNav } from "@/components/top-nav";
 import { authFetch } from "@/lib/api";
 import { useAppDialog } from "@/components/app-dialog-provider";
+import { useLocale } from "@/lib/locale";
 
 const TRAINING_NAV_LINKS = [
   { href: "/analyze", label: "Analyze" },
@@ -15,14 +16,50 @@ const TRAINING_NAV_LINKS = [
 
 const TRAINING_HANDOFF_STORAGE_KEY = "engarde.training.handoff";
 const ANALYZE_WINDOW_DAYS = 14;
-const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+const WEEKDAY_LABELS_EN = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+const WEEKDAY_LABELS_ZH = ["日", "一", "二", "三", "四", "五", "六"] as const;
 
 const RPE_LEVEL_GUIDE = [
-  { range: "1-2", label: "Very Easy", description: "Recovery pace, almost no strain", color: "#22c55e" },
-  { range: "3-4", label: "Easy", description: "Comfortable, can continue for long", color: "#84cc16" },
-  { range: "5-6", label: "Moderate", description: "Focused effort, stable technique", color: "#f59e0b" },
-  { range: "7-8", label: "Hard", description: "High stress, fatigue builds quickly", color: "#f97316" },
-  { range: "9-10", label: "Max", description: "Near limit, short duration only", color: "#ef4444" },
+  {
+    range: "1-2",
+    labelEn: "Very Easy",
+    labelZh: "非常轻松",
+    descriptionEn: "Recovery pace, almost no strain",
+    descriptionZh: "恢复节奏，几乎无负担",
+    color: "#22c55e",
+  },
+  {
+    range: "3-4",
+    labelEn: "Easy",
+    labelZh: "轻松",
+    descriptionEn: "Comfortable, can continue for long",
+    descriptionZh: "较舒适，可持续较长时间",
+    color: "#84cc16",
+  },
+  {
+    range: "5-6",
+    labelEn: "Moderate",
+    labelZh: "中等",
+    descriptionEn: "Focused effort, stable technique",
+    descriptionZh: "专注发力，技术稳定",
+    color: "#f59e0b",
+  },
+  {
+    range: "7-8",
+    labelEn: "Hard",
+    labelZh: "困难",
+    descriptionEn: "High stress, fatigue builds quickly",
+    descriptionZh: "压力较高，疲劳累积快",
+    color: "#f97316",
+  },
+  {
+    range: "9-10",
+    labelEn: "Max",
+    labelZh: "极限",
+    descriptionEn: "Near limit, short duration only",
+    descriptionZh: "接近极限，仅能短时维持",
+    color: "#ef4444",
+  },
 ];
 
 interface TrainingLogItem {
@@ -83,14 +120,18 @@ const parseApiError = async (response: Response, fallback: string) => {
   return fallback;
 };
 
-const formatDisplayDate = (dateKey: string) => {
+const formatDisplayDate = (dateKey: string, isZh: boolean) => {
   const [year, month, day] = dateKey.split("-").map((item) => Number(item));
   const value = new Date(year, month - 1, day);
-  const weekday = WEEKDAY_LABELS[value.getDay()] || "";
+  const weekday = (isZh ? WEEKDAY_LABELS_ZH : WEEKDAY_LABELS_EN)[value.getDay()] || "";
+  if (isZh) {
+    return `${value.toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric" })} 周${weekday}`;
+  }
   return `${value.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })} ${weekday}`;
 };
 
-const getMonthLabel = (value: Date) => value.toLocaleDateString("en-US", { year: "numeric", month: "long" });
+const getMonthLabel = (value: Date, isZh: boolean) =>
+  value.toLocaleDateString(isZh ? "zh-CN" : "en-US", { year: "numeric", month: "long" });
 
 const sortLogsDesc = (a: TrainingLogItem, b: TrainingLogItem) => {
   if (a.training_date !== b.training_date) {
@@ -112,7 +153,12 @@ const sortDailyLogs = (a: TrainingLogItem, b: TrainingLogItem) => {
 export default function TrainingPage() {
   const router = useRouter();
   const { confirm } = useAppDialog();
+  const { isZh } = useLocale();
   const todayKey = useMemo(() => formatDateKey(new Date()), []);
+  const t = useCallback(
+    (zh: string, en: string) => (isZh ? zh : en),
+    [isZh],
+  );
 
   const [selectedDateKey, setSelectedDateKey] = useState(todayKey);
   const [calendarMonth, setCalendarMonth] = useState(() => {
@@ -166,18 +212,18 @@ export default function TrainingPage() {
       setIsLogsLoading(true);
       const response = await authFetch("/api/training/logs?limit=240");
       if (!response.ok) {
-        const message = await parseApiError(response, "Failed to load training logs");
+        const message = await parseApiError(response, t("加载训练记录失败", "Failed to load training logs"));
         throw new Error(message);
       }
       const payload = (await response.json()) as TrainingLogListResponse;
       setLogs((payload.logs || []).sort(sortLogsDesc));
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load training logs");
+      setError(err instanceof Error ? err.message : t("加载训练记录失败", "Failed to load training logs"));
     } finally {
       setIsLogsLoading(false);
     }
-  }, []);
+  }, [t]);
 
   const refreshSelectedDateEntries = useCallback(
     async (dateKey: string) => {
@@ -185,7 +231,7 @@ export default function TrainingPage() {
         setIsDateLoading(true);
         const response = await authFetch(`/api/training/logs?training_date=${dateKey}&limit=120`);
         if (!response.ok) {
-          const message = await parseApiError(response, "Failed to load selected date entries");
+          const message = await parseApiError(response, t("加载当日记录失败", "Failed to load selected date entries"));
           throw new Error(message);
         }
         const payload = (await response.json()) as TrainingLogListResponse;
@@ -193,12 +239,12 @@ export default function TrainingPage() {
         mergeLogsForDate(dateKey, dateLogs);
         setError(null);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load selected date entries");
+        setError(err instanceof Error ? err.message : t("加载当日记录失败", "Failed to load selected date entries"));
       } finally {
         setIsDateLoading(false);
       }
     },
-    [mergeLogsForDate],
+    [mergeLogsForDate, t],
   );
 
   useEffect(() => {
@@ -329,7 +375,7 @@ export default function TrainingPage() {
 
   const handleSave = useCallback(async () => {
     if (!trainingContent.trim()) {
-      setError("Please fill in training content before saving.");
+      setError(t("请先填写训练内容再保存。", "Please fill in training content before saving."));
       return;
     }
 
@@ -357,21 +403,21 @@ export default function TrainingPage() {
       });
 
       if (!response.ok) {
-        const message = await parseApiError(response, "Failed to save training log");
+        const message = await parseApiError(response, t("保存训练记录失败", "Failed to save training log"));
         throw new Error(message);
       }
 
       const savedLog = (await response.json()) as TrainingLogItem;
       setSelectedLogId(savedLog.id);
       applyLogToForm(savedLog);
-      setSaveMessage(isEditing ? "Updated" : "Saved");
+      setSaveMessage(isEditing ? t("已更新", "Updated") : t("已保存", "Saved"));
       setError(null);
 
       await refreshSelectedDateEntries(selectedDateKey);
       await loadLogs();
     } catch (err) {
       setSaveMessage(null);
-      setError(err instanceof Error ? err.message : "Failed to save training log");
+      setError(err instanceof Error ? err.message : t("保存训练记录失败", "Failed to save training log"));
     } finally {
       setIsSaving(false);
     }
@@ -385,16 +431,17 @@ export default function TrainingPage() {
     selectedDateKey,
     selectedLogId,
     startTime,
+    t,
     trainingContent,
   ]);
 
   const handleDelete = useCallback(async () => {
     if (!selectedLogId) return;
     const confirmed = await confirm({
-      title: "Delete this training entry?",
-      description: "This action cannot be undone.",
-      confirmText: "Delete",
-      cancelText: "Cancel",
+      title: t("删除这条训练记录？", "Delete this training entry?"),
+      description: t("此操作不可撤销。", "This action cannot be undone."),
+      confirmText: t("删除", "Delete"),
+      cancelText: t("取消", "Cancel"),
       danger: true,
     });
     if (!confirmed) return;
@@ -405,22 +452,22 @@ export default function TrainingPage() {
         method: "DELETE",
       });
       if (!response.ok) {
-        const message = await parseApiError(response, "Failed to delete training log");
+        const message = await parseApiError(response, t("删除训练记录失败", "Failed to delete training log"));
         throw new Error(message);
       }
 
       setSelectedLogId(null);
-      setSaveMessage("Deleted entry");
+      setSaveMessage(t("已删除记录", "Deleted entry"));
       setError(null);
       resetForm();
       await refreshSelectedDateEntries(selectedDateKey);
       await loadLogs();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete training log");
+      setError(err instanceof Error ? err.message : t("删除训练记录失败", "Failed to delete training log"));
     } finally {
       setIsDeleting(false);
     }
-  }, [confirm, loadLogs, refreshSelectedDateEntries, resetForm, selectedDateKey, selectedLogId]);
+  }, [confirm, loadLogs, refreshSelectedDateEntries, resetForm, selectedDateKey, selectedLogId, t]);
 
   const handleCloseEditor = useCallback(() => {
     setIsEditorExpanded(false);
@@ -445,7 +492,10 @@ export default function TrainingPage() {
       );
 
       if (!response.ok) {
-        const message = await parseApiError(response, "Failed to prepare training analysis context");
+        const message = await parseApiError(
+          response,
+          t("准备训练分析上下文失败", "Failed to prepare training analysis context"),
+        );
         throw new Error(message);
       }
 
@@ -456,7 +506,7 @@ export default function TrainingPage() {
       });
 
       if (logsForAnalysis.length === 0) {
-        setError("No training logs in the recent window. Add at least one session first.");
+        setError(t("最近时间窗内暂无训练记录，请先添加至少一条训练。", "No training logs in the recent window. Add at least one session first."));
         return;
       }
 
@@ -484,10 +534,10 @@ export default function TrainingPage() {
       };
 
       const summary = [
-        `Window: last ${ANALYZE_WINDOW_DAYS} days`,
-        `Entries: ${logsForAnalysis.length}`,
-        `Total duration: ${totalMinutes} minutes`,
-        `Average RPE: ${avgRpe.toFixed(1)}`,
+        t(`时间窗：最近 ${ANALYZE_WINDOW_DAYS} 天`, `Window: last ${ANALYZE_WINDOW_DAYS} days`),
+        t(`记录数：${logsForAnalysis.length}`, `Entries: ${logsForAnalysis.length}`),
+        t(`总时长：${totalMinutes} 分钟`, `Total duration: ${totalMinutes} minutes`),
+        t(`平均 RPE：${avgRpe.toFixed(1)}`, `Average RPE: ${avgRpe.toFixed(1)}`),
       ].join("\n");
 
       const handoff: TrainingHandoffPayload = {
@@ -495,32 +545,36 @@ export default function TrainingPage() {
         summary,
         status: {
           source: "training",
-          label: "Recent training logs",
-          window: `${ANALYZE_WINDOW_DAYS} days`,
+          label: t("近期训练记录", "Recent training logs"),
+          window: t(`${ANALYZE_WINDOW_DAYS} 天`, `${ANALYZE_WINDOW_DAYS} days`),
           entry_count: logsForAnalysis.length,
           updated_at: new Date().toISOString(),
         },
         suggested_prompts: [
-          "评估我最近疲劳和下周负荷安排。",
-          "Analyze my current fatigue status based on recent logs.",
-          "Recommend load adjustment for my next 7 days.",
-          "Identify overreaching risk and recovery priorities.",
-          "Suggest a focused technical session for tomorrow.",
+          t("评估我最近的疲劳状态，并给出下周训练负荷建议。", "Evaluate my recent fatigue and suggest next week's load progression."),
+          t("基于最近训练记录，分析我当前的疲劳情况。", "Analyze my current fatigue status based on recent logs."),
+          t("为我接下来 7 天推荐训练负荷调整方案。", "Recommend load adjustment for my next 7 days."),
+          t("识别是否有过度训练风险，并给出恢复优先项。", "Identify overreaching risk and recovery priorities."),
+          t("为明天建议一节聚焦技术训练。", "Suggest a focused technical session for tomorrow."),
         ],
-        opening_message:
-          `Training context is attached (${logsForAnalysis.length} entries, ` +
-          `last ${ANALYZE_WINDOW_DAYS} days). Ask for fatigue and next-step training advice.`,
-        auto_question: "Evaluate my recent fatigue and suggest next week's load progression.",
+        opening_message: t(
+          `训练上下文已附加（${logsForAnalysis.length} 条记录，最近 ${ANALYZE_WINDOW_DAYS} 天）。你可以让我分析疲劳并给出下一步训练建议。`,
+          `Training context is attached (${logsForAnalysis.length} entries, last ${ANALYZE_WINDOW_DAYS} days). Ask for fatigue and next-step training advice.`,
+        ),
+        auto_question: t(
+          "评估我最近的疲劳状态，并给出下周训练负荷建议。",
+          "Evaluate my recent fatigue and suggest next week's load progression.",
+        ),
       };
 
       window.localStorage.setItem(TRAINING_HANDOFF_STORAGE_KEY, JSON.stringify(handoff));
       router.push("/analyze?training_context=1");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to prepare training analysis context");
+      setError(err instanceof Error ? err.message : t("准备训练分析上下文失败", "Failed to prepare training analysis context"));
     } finally {
       setIsPreparingAnalysis(false);
     }
-  }, [router]);
+  }, [router, t]);
 
   const selectedMonth = calendarMonth.getMonth();
   const selectedYear = calendarMonth.getFullYear();
@@ -533,15 +587,15 @@ export default function TrainingPage() {
         <div className="max-w-7xl mx-auto px-4 md:px-6 space-y-6">
           <div className="grid gap-4 md:grid-cols-3">
             <div className="glass-card rounded-2xl p-5">
-              <p className="text-sm text-muted-foreground">Entries (7d)</p>
+              <p className="text-sm text-muted-foreground">{t("记录数（7天）", "Entries (7d)")}</p>
               <p className="text-3xl font-bold mt-1">{summaryStats.sessions}</p>
             </div>
             <div className="glass-card rounded-2xl p-5">
-              <p className="text-sm text-muted-foreground">Total Minutes (7d)</p>
+              <p className="text-sm text-muted-foreground">{t("总时长（分钟，7天）", "Total Minutes (7d)")}</p>
               <p className="text-3xl font-bold mt-1">{summaryStats.totalMinutes}</p>
             </div>
             <div className="glass-card rounded-2xl p-5">
-              <p className="text-sm text-muted-foreground">Average RPE (7d)</p>
+              <p className="text-sm text-muted-foreground">{t("平均 RPE（7天）", "Average RPE (7d)")}</p>
               <p className="text-3xl font-bold mt-1">{summaryStats.avgRpe.toFixed(1)}</p>
             </div>
           </div>
@@ -553,18 +607,18 @@ export default function TrainingPage() {
                   type="button"
                   onClick={() => setCalendarMonth(new Date(selectedYear, selectedMonth - 1, 1))}
                   className="h-9 w-9 rounded-xl border border-border bg-card text-muted-foreground hover:text-foreground"
-                  aria-label="Previous month"
+                  aria-label={t("上个月", "Previous month")}
                 >
                   <svg className="h-4 w-4 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
                   </svg>
                 </button>
-                <p className="text-lg font-semibold">{getMonthLabel(calendarMonth)}</p>
+                <p className="text-lg font-semibold">{getMonthLabel(calendarMonth, isZh)}</p>
                 <button
                   type="button"
                   onClick={() => setCalendarMonth(new Date(selectedYear, selectedMonth + 1, 1))}
                   className="h-9 w-9 rounded-xl border border-border bg-card text-muted-foreground hover:text-foreground"
-                  aria-label="Next month"
+                  aria-label={t("下个月", "Next month")}
                 >
                   <svg className="h-4 w-4 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
@@ -573,9 +627,9 @@ export default function TrainingPage() {
               </div>
 
               <div className="grid grid-cols-7 mb-2 text-xs font-semibold text-muted-foreground">
-                {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((weekday) => (
+                {(isZh ? WEEKDAY_LABELS_ZH : WEEKDAY_LABELS_EN).map((weekday) => (
                   <div key={weekday} className="text-center py-2">
-                    {weekday}
+                    {isZh ? `周${weekday}` : weekday}
                   </div>
                 ))}
               </div>
@@ -611,12 +665,14 @@ export default function TrainingPage() {
               </div>
 
               <div className="mt-4 rounded-2xl border border-border bg-card p-4">
-                <p className="text-xs uppercase tracking-wide text-muted-foreground">Selected Date</p>
-                <p className="mt-1 text-base font-semibold">{formatDisplayDate(selectedDateKey)}</p>
+                <p className="text-xs uppercase tracking-wide text-muted-foreground">{t("选择日期", "Selected Date")}</p>
+                <p className="mt-1 text-base font-semibold">{formatDisplayDate(selectedDateKey, isZh)}</p>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  {dailyLogs.length} entr{dailyLogs.length === 1 ? "y" : "ies"} on this day
+                  {isZh
+                    ? `${dailyLogs.length} 条记录`
+                    : `${dailyLogs.length} entr${dailyLogs.length === 1 ? "y" : "ies"} on this day`}
                 </p>
-                {isDateLoading && <p className="mt-2 text-xs text-muted-foreground">Loading entries...</p>}
+                {isDateLoading && <p className="mt-2 text-xs text-muted-foreground">{t("正在加载记录...", "Loading entries...")}</p>}
               </div>
 
               <button
@@ -625,18 +681,20 @@ export default function TrainingPage() {
                 disabled={isPreparingAnalysis}
                 className="mt-4 w-full rounded-2xl bg-red-600 px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:opacity-60"
               >
-                {isPreparingAnalysis ? "Preparing Training Context..." : "Analyze Recent Training in AI Coach"}
+                {isPreparingAnalysis
+                  ? t("准备训练上下文中...", "Preparing Training Context...")
+                  : t("在 AI 教练中分析近期训练", "Analyze Recent Training in AI Coach")}
               </button>
 
               <div className="mt-4">
-                <p className="text-sm font-semibold mb-2">Recent Entries</p>
+                <p className="text-sm font-semibold mb-2">{t("近期记录", "Recent Entries")}</p>
                 {isLogsLoading ? (
                   <div className="rounded-xl border border-border bg-card p-3 text-sm text-muted-foreground">
-                    Loading records...
+                    {t("加载记录中...", "Loading records...")}
                   </div>
                 ) : logs.length === 0 ? (
                   <div className="rounded-xl border border-dashed border-border p-3 text-sm text-muted-foreground">
-                    No logs yet. Start with today.
+                    {t("暂无记录，先从今天开始。", "No logs yet. Start with today.")}
                   </div>
                 ) : (
                   <div className="space-y-2 max-h-44 overflow-y-auto pr-1">
@@ -662,10 +720,10 @@ export default function TrainingPage() {
                       >
                         <div className="flex items-center justify-between gap-3">
                           <p className="text-sm font-semibold">
-                            {formatDisplayDate(item.training_date)} · {item.start_time || "No time"}
+                            {formatDisplayDate(item.training_date, isZh)} · {item.start_time || t("未填写时间", "No time")}
                           </p>
                           <span className="text-xs text-muted-foreground">
-                            {item.duration_minutes} min · RPE {item.rpe}
+                            {isZh ? `${item.duration_minutes} 分钟 · RPE ${item.rpe}` : `${item.duration_minutes} min · RPE ${item.rpe}`}
                           </span>
                         </div>
                         <p className="mt-1 truncate text-xs text-muted-foreground">{item.training_content}</p>
@@ -678,28 +736,30 @@ export default function TrainingPage() {
 
             <section className="glass-card rounded-3xl p-5 md:p-6">
               <div className="mb-4">
-                <h1 className="text-2xl md:text-3xl font-bold">Daily Training Log</h1>
+                <h1 className="text-2xl md:text-3xl font-bold">{t("每日训练日志", "Daily Training Log")}</h1>
                 <p className="text-muted-foreground mt-1">
-                  Multiple entries per day are supported. Click an entry to edit it.
+                  {t("支持同一天多条记录。点击某条记录即可编辑。", "Multiple entries per day are supported. Click an entry to edit it.")}
                 </p>
               </div>
 
               <div className="mb-4 rounded-2xl border border-border bg-card p-4">
                 <div className="mb-3 flex items-center justify-between gap-3">
-                  <p className="text-sm font-semibold">Entries on {formatDisplayDate(selectedDateKey)}</p>
+                  <p className="text-sm font-semibold">
+                    {t("当日记录", "Entries on")} {formatDisplayDate(selectedDateKey, isZh)}
+                  </p>
                   <button
                     type="button"
                     onClick={startCreateNewEntry}
                     className="rounded-lg border border-border bg-background px-3 py-1.5 text-xs font-semibold text-muted-foreground hover:text-foreground"
                   >
-                    New Entry
+                    {t("新建记录", "New Entry")}
                   </button>
                 </div>
 
                 {isDateLoading ? (
-                  <p className="text-sm text-muted-foreground">Loading entries...</p>
+                  <p className="text-sm text-muted-foreground">{t("加载记录中...", "Loading entries...")}</p>
                 ) : dailyLogs.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No entries yet for this day.</p>
+                  <p className="text-sm text-muted-foreground">{t("该日期暂无记录。", "No entries yet for this day.")}</p>
                 ) : (
                   <div className="max-h-48 space-y-2 overflow-y-auto pr-1">
                     {dailyLogs.map((item, index) => (
@@ -715,10 +775,10 @@ export default function TrainingPage() {
                       >
                         <div className="flex items-center justify-between gap-3">
                           <p className="text-sm font-semibold">
-                            Entry {index + 1} · {item.start_time || "No start time"}
+                            {t("记录", "Entry")} {index + 1} · {item.start_time || t("未填写开始时间", "No start time")}
                           </p>
                           <span className="text-xs text-muted-foreground">
-                            {item.duration_minutes} min · RPE {item.rpe}
+                            {isZh ? `${item.duration_minutes} 分钟 · RPE ${item.rpe}` : `${item.duration_minutes} min · RPE ${item.rpe}`}
                           </span>
                         </div>
                         <p className="mt-1 truncate text-xs text-muted-foreground">{item.training_content}</p>
@@ -730,7 +790,7 @@ export default function TrainingPage() {
 
               <div className="mb-3 flex items-center justify-between">
                 <p className="text-sm font-semibold text-muted-foreground">
-                  {selectedLogId ? "Editing selected entry" : "Creating new entry"}
+                  {selectedLogId ? t("正在编辑所选记录", "Editing selected entry") : t("正在创建新记录", "Creating new entry")}
                 </p>
                 {selectedLogId && (
                   <button
@@ -738,15 +798,16 @@ export default function TrainingPage() {
                     onClick={startCreateNewEntry}
                     className="text-xs font-semibold text-red-600 hover:text-red-700"
                   >
-                    Switch to New Entry
+                    {t("切换为新建记录", "Switch to New Entry")}
                   </button>
                 )}
               </div>
 
               {!isEditorExpanded && (
                 <div className="rounded-2xl border border-dashed border-border bg-card/70 p-4 text-sm text-muted-foreground">
-                  Click <span className="font-semibold text-foreground">New Entry</span> or select an existing record
-                  to expand the editor.
+                  {t("点击 ", "Click ")}
+                  <span className="font-semibold text-foreground">{t("新建记录", "New Entry")}</span>
+                  {t(" 或选择已有记录以展开编辑器。", " or select an existing record to expand the editor.")}
                 </div>
               )}
 
@@ -754,7 +815,7 @@ export default function TrainingPage() {
                 <>
                   <div className="grid gap-4 md:grid-cols-2">
                     <div>
-                      <label className="mb-2 block text-sm text-muted-foreground">Start Time</label>
+                      <label className="mb-2 block text-sm text-muted-foreground">{t("开始时间", "Start Time")}</label>
                       <input
                         type="time"
                         value={startTime}
@@ -763,7 +824,7 @@ export default function TrainingPage() {
                       />
                     </div>
                     <div>
-                      <label className="mb-2 block text-sm text-muted-foreground">Duration (minutes)</label>
+                      <label className="mb-2 block text-sm text-muted-foreground">{t("时长（分钟）", "Duration (minutes)")}</label>
                       <input
                         type="number"
                         min={0}
@@ -776,11 +837,14 @@ export default function TrainingPage() {
                   </div>
 
                   <div className="mt-4">
-                    <label className="mb-2 block text-sm text-muted-foreground">Training Content</label>
+                    <label className="mb-2 block text-sm text-muted-foreground">{t("训练内容", "Training Content")}</label>
                     <textarea
                       value={trainingContent}
                       onChange={(event) => setTrainingContent(event.target.value)}
-                      placeholder="Example: Footwork ladder, 6x5 lunge reps, parry-riposte drills, sparring notes..."
+                      placeholder={t(
+                        "示例：步法梯训练、6x5 弓步、格挡反击训练、实战笔记...",
+                        "Example: Footwork ladder, 6x5 lunge reps, parry-riposte drills, sparring notes...",
+                      )}
                       rows={5}
                       className="w-full rounded-xl border border-border bg-background px-3 py-2.5"
                     />
@@ -789,24 +853,27 @@ export default function TrainingPage() {
                   <div className="mt-4 rounded-2xl border border-border bg-card p-4">
                     <div className="flex items-center justify-between gap-3">
                       <div className="flex items-center gap-2">
-                        <label className="text-sm text-muted-foreground">Subjective RPE (1-10)</label>
+                        <label className="text-sm text-muted-foreground">{t("主观 RPE（1-10）", "Subjective RPE (1-10)")}</label>
                         <div className="group relative">
                           <button
                             type="button"
-                            aria-label="Show RPE scale guide"
+                            aria-label={t("显示 RPE 量表说明", "Show RPE scale guide")}
                             className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-border bg-background text-xs font-semibold text-muted-foreground transition-colors hover:border-red-300 hover:text-foreground"
                           >
                             i
                           </button>
                           <div className="invisible absolute left-full top-1/2 z-20 ml-3 w-[360px] -translate-y-1/2 translate-x-1 rounded-2xl border border-border bg-background/95 p-4 opacity-0 shadow-2xl backdrop-blur transition-all duration-150 group-hover:visible group-hover:translate-x-0 group-hover:opacity-100 group-focus-within:visible group-focus-within:translate-x-0 group-focus-within:opacity-100">
-                            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">RPE Guide</p>
+                            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{t("RPE 说明", "RPE Guide")}</p>
                             <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                              Rate how hard the session felt overall (1 = very easy, 10 = max effort).
+                              {t(
+                                "请按本次训练主观整体强度打分（1=非常轻松，10=极限强度）。",
+                                "Rate how hard the session felt overall (1 = very easy, 10 = max effort).",
+                              )}
                             </p>
                             <div className="mt-3 rounded-xl border border-border/70 bg-card/80 overflow-hidden">
                               {RPE_LEVEL_GUIDE.map((item, index) => (
                                 <div
-                                  key={`${item.range}-${item.label}`}
+                                  key={`${item.range}-${item.labelEn}`}
                                   className={`flex items-start gap-3 px-3 py-2.5 ${index > 0 ? "border-t border-border/60" : ""}`}
                                 >
                                   <span
@@ -820,8 +887,10 @@ export default function TrainingPage() {
                                     {item.range}
                                   </span>
                                   <div className="min-w-0">
-                                    <p className="text-xs font-semibold text-foreground">{item.label}</p>
-                                    <p className="text-xs leading-relaxed text-muted-foreground">{item.description}</p>
+                                    <p className="text-xs font-semibold text-foreground">{isZh ? item.labelZh : item.labelEn}</p>
+                                    <p className="text-xs leading-relaxed text-muted-foreground">
+                                      {isZh ? item.descriptionZh : item.descriptionEn}
+                                    </p>
                                   </div>
                                 </div>
                               ))}
@@ -840,17 +909,20 @@ export default function TrainingPage() {
                       className="mt-3 w-full accent-red-600"
                     />
                     <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground">
-                      <span>Very Easy</span>
-                      <span>Max Effort</span>
+                      <span>{t("非常轻松", "Very Easy")}</span>
+                      <span>{t("极限强度", "Max Effort")}</span>
                     </div>
                   </div>
 
                   <div className="mt-4">
-                    <label className="mb-2 block text-sm text-muted-foreground">Post-Training Notes</label>
+                    <label className="mb-2 block text-sm text-muted-foreground">{t("训练后备注", "Post-Training Notes")}</label>
                     <textarea
                       value={notes}
                       onChange={(event) => setNotes(event.target.value)}
-                      placeholder="Example: Legs heavy after sparring, right shoulder tightness, sleep target tonight..."
+                      placeholder={t(
+                        "示例：实战后双腿疲劳，右肩有紧张感，今晚优先保证睡眠...",
+                        "Example: Legs heavy after sparring, right shoulder tightness, sleep target tonight...",
+                      )}
                       rows={4}
                       className="w-full rounded-xl border border-border bg-background px-3 py-2.5"
                     />
@@ -875,7 +947,11 @@ export default function TrainingPage() {
                       disabled={isSaving}
                       className="rounded-xl bg-red-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:opacity-60"
                     >
-                      {isSaving ? "Saving..." : selectedLogId ? "Update Entry" : "Save Entry"}
+                      {isSaving
+                        ? t("保存中...", "Saving...")
+                        : selectedLogId
+                          ? t("更新记录", "Update Entry")
+                          : t("保存记录", "Save Entry")}
                     </button>
                 <button
                   type="button"
@@ -883,7 +959,7 @@ export default function TrainingPage() {
                   disabled={isDeleting || isSaving}
                   className="rounded-xl border border-border bg-card px-5 py-2.5 text-sm font-semibold text-foreground disabled:opacity-60"
                 >
-                  {isDeleting ? "Deleting..." : selectedLogId ? "Delete Entry" : "Close"}
+                  {isDeleting ? t("删除中...", "Deleting...") : selectedLogId ? t("删除记录", "Delete Entry") : t("关闭", "Close")}
                 </button>
               </div>
                 </>

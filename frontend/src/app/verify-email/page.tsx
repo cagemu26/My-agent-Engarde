@@ -3,8 +3,10 @@
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { buildApiUrl } from "@/lib/api";
+import { useLocale } from "@/lib/locale";
 
 function VerifyEmailContent() {
+  const { isZh } = useLocale();
   const searchParams = useSearchParams();
   const router = useRouter();
   const token = searchParams.get("token");
@@ -14,7 +16,7 @@ function VerifyEmailContent() {
   const verifyEmail = useCallback(async () => {
     if (!token) {
       setStatus("error");
-      setMessage("Invalid verification token");
+      setMessage(isZh ? "无效的验证令牌" : "Invalid verification token");
       return;
     }
 
@@ -27,22 +29,22 @@ function VerifyEmailContent() {
         setMessage(data.message);
       } else {
         setStatus("error");
-        setMessage(data.message || "Verification failed");
+        setMessage(data.message || (isZh ? "验证失败" : "Verification failed"));
       }
     } catch {
       setStatus("error");
-      setMessage("An error occurred during verification");
+      setMessage(isZh ? "验证过程中发生错误" : "An error occurred during verification");
     }
-  }, [token]);
+  }, [isZh, token]);
 
   useEffect(() => {
     if (token) {
       verifyEmail();
     } else {
       setStatus("error");
-      setMessage("Invalid verification token");
+      setMessage(isZh ? "无效的验证令牌" : "Invalid verification token");
     }
-  }, [token, verifyEmail]);
+  }, [isZh, token, verifyEmail]);
 
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-4">
@@ -58,8 +60,8 @@ function VerifyEmailContent() {
           {status === "loading" && (
             <>
               <div className="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-red-600 mx-auto mb-6"></div>
-              <h2 className="text-2xl font-bold mb-2">Verifying Email</h2>
-              <p className="text-muted-foreground">Please wait...</p>
+              <h2 className="text-2xl font-bold mb-2">{isZh ? "邮箱验证中" : "Verifying Email"}</h2>
+              <p className="text-muted-foreground">{isZh ? "请稍候..." : "Please wait..."}</p>
             </>
           )}
 
@@ -70,13 +72,13 @@ function VerifyEmailContent() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                 </svg>
               </div>
-              <h2 className="text-2xl font-bold mb-2">Email Verified!</h2>
+              <h2 className="text-2xl font-bold mb-2">{isZh ? "邮箱验证成功！" : "Email Verified!"}</h2>
               <p className="text-muted-foreground mb-6">{message}</p>
               <button
                 onClick={() => router.push("/login")}
                 className="px-6 py-3 rounded-xl bg-gradient-to-r from-red-600 to-red-700 text-white font-medium hover:shadow-lg hover:shadow-red-500/30 transition-all"
               >
-                Go to Login
+                {isZh ? "前往登录" : "Go to Login"}
               </button>
             </>
           )}
@@ -88,13 +90,13 @@ function VerifyEmailContent() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </div>
-              <h2 className="text-2xl font-bold mb-2">Verification Failed</h2>
+              <h2 className="text-2xl font-bold mb-2">{isZh ? "验证失败" : "Verification Failed"}</h2>
               <p className="text-muted-foreground mb-6">{message}</p>
               <button
                 onClick={() => router.push("/")}
                 className="px-6 py-3 rounded-xl bg-gradient-to-r from-red-600 to-red-700 text-white font-medium hover:shadow-lg hover:shadow-red-500/30 transition-all"
               >
-                Back to Home
+                {isZh ? "返回首页" : "Back to Home"}
               </button>
             </>
           )}

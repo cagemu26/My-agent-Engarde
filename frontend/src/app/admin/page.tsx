@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { TopNav } from "@/components/top-nav";
+import { useLocale } from "@/lib/locale";
 
 const ADMIN_NAV_LINKS = [
   { href: "/analyze", label: "Analyze" },
@@ -17,6 +18,7 @@ const ADMIN_NAV_LINKS = [
 export default function AdminPage() {
   const { user, isLoading } = useAuth();
   const router = useRouter();
+  const { isZh } = useLocale();
 
   useEffect(() => {
     if (!isLoading && !user) {
@@ -52,20 +54,20 @@ export default function AdminPage() {
         <div className="max-w-7xl mx-auto px-6">
           <div className="mb-8 flex flex-wrap items-end justify-between gap-3">
             <div>
-              <h1 className="text-3xl font-bold mb-2">Admin Dashboard</h1>
-              <p className="text-muted-foreground">Manage your application</p>
+              <h1 className="text-3xl font-bold mb-2">{isZh ? "管理后台" : "Admin Dashboard"}</h1>
+              <p className="text-muted-foreground">{isZh ? "管理你的应用" : "Manage your application"}</p>
             </div>
             <div className="flex items-center gap-2">
               {user.is_admin && (
                 <span className="rounded-full border border-red-200 bg-red-50 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-red-700">
-                  Admin
+                  {isZh ? "管理员" : "Admin"}
                 </span>
               )}
               <Link
                 href="/"
                 className="rounded-full border border-border bg-card px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-muted"
               >
-                Back to Home
+                {isZh ? "返回首页" : "Back to Home"}
               </Link>
             </div>
           </div>
@@ -79,9 +81,11 @@ export default function AdminPage() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
                   </svg>
                 </div>
-                <h2 className="text-xl font-bold mb-2">User Management</h2>
+                <h2 className="text-xl font-bold mb-2">{isZh ? "用户管理" : "User Management"}</h2>
                 <p className="text-muted-foreground">
-                  View and manage registered users, toggle user status, and manage admin privileges.
+                  {isZh
+                    ? "查看和管理注册用户，切换用户状态，并管理管理员权限。"
+                    : "View and manage registered users, toggle user status, and manage admin privileges."}
                 </p>
               </div>
             </Link>
@@ -94,9 +98,11 @@ export default function AdminPage() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 5v2m0 4v2m0 4v2M5 5a2 2 0 00-2 2v3a2 2 0 110 4v3a2 2 0 002 2h14a2 2 0 002-2v-3a2 2 0 110-4V7a2 2 0 00-2-2H5z" />
                   </svg>
                 </div>
-                <h2 className="text-xl font-bold mb-2">Invitation Codes</h2>
+                <h2 className="text-xl font-bold mb-2">{isZh ? "邀请码管理" : "Invitation Codes"}</h2>
                 <p className="text-muted-foreground">
-                  Create, view, and manage invitation codes for user registration.
+                  {isZh
+                    ? "创建、查看和管理用于用户注册的邀请码。"
+                    : "Create, view, and manage invitation codes for user registration."}
                 </p>
               </div>
             </Link>
@@ -109,9 +115,11 @@ export default function AdminPage() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
                   </svg>
                 </div>
-                <h2 className="text-xl font-bold mb-2">User Feedback</h2>
+                <h2 className="text-xl font-bold mb-2">{isZh ? "用户反馈" : "User Feedback"}</h2>
                 <p className="text-muted-foreground">
-                  View and manage user feedback, bug reports, and feature requests.
+                  {isZh
+                    ? "查看并管理用户反馈、问题报告和功能建议。"
+                    : "View and manage user feedback, bug reports, and feature requests."}
                 </p>
               </div>
             </Link>

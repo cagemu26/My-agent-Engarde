@@ -5,6 +5,7 @@ import Link from "next/link";
 import { buildApiUrl } from "@/lib/api";
 import { getFrameAthlete, type PoseData } from "@/lib/pose-data";
 import { TopNav } from "@/components/top-nav";
+import { useLocale } from "@/lib/locale";
 
 const POSE_CONNECTIONS = [
   [11, 12], [11, 13], [13, 15], [12, 14], [14, 16],
@@ -30,6 +31,7 @@ const DEMO_NAV_LINKS = [
 ] as const;
 
 export default function Demo() {
+  const { isZh } = useLocale();
   const [showOverlay, setShowOverlay] = useState(false);
   const [poseData, setPoseData] = useState<PoseData | null>(null);
   const [currentFrame, setCurrentFrame] = useState(0);
@@ -162,9 +164,13 @@ export default function Demo() {
         <div className="max-w-6xl mx-auto px-6">
           {/* Header */}
           <div className="text-center mb-10">
-            <h1 className="text-4xl md:text-5xl font-bold mb-4">See Engarde AI in Action</h1>
+            <h1 className="text-4xl md:text-5xl font-bold mb-4">
+              {isZh ? "体验 Engarde AI 的分析效果" : "See Engarde AI in Action"}
+            </h1>
             <p className="text-muted-foreground text-lg">
-              Watch how our AI analyzes fencing technique in real-time with pose detection
+              {isZh
+                ? "查看 AI 如何通过姿态识别实时分析击剑技术。"
+                : "Watch how our AI analyzes fencing technique in real-time with pose detection"}
             </p>
           </div>
 
@@ -177,7 +183,7 @@ export default function Demo() {
               preload="metadata"
             >
               <source src={buildApiUrl(`/video/${DEMO_VIDEO_ID}`)} type="video/mp4" />
-              Your browser does not support the video tag.
+              {isZh ? "你的浏览器不支持视频标签。" : "Your browser does not support the video tag."}
             </video>
 
             {showOverlay && (
@@ -191,7 +197,7 @@ export default function Demo() {
               <div className="absolute inset-0 bg-background/80 flex items-center justify-center">
                 <div className="flex flex-col items-center gap-4">
                   <div className="w-12 h-12 border-4 border-red-500 border-t-transparent rounded-full animate-spin"></div>
-                  <p className="text-muted-foreground">Loading pose data...</p>
+                  <p className="text-muted-foreground">{isZh ? "加载姿态数据中..." : "Loading pose data..."}</p>
                 </div>
               </div>
             )}
@@ -206,16 +212,16 @@ export default function Demo() {
                     : "bg-black/70 text-white hover:bg-black/90"
                 }`}
               >
-                {showOverlay ? "🟢 Skeleton On" : "Show Skeleton"}
+                {showOverlay ? (isZh ? "🟢 骨架已开启" : "🟢 Skeleton On") : isZh ? "显示骨架" : "Show Skeleton"}
               </button>
             </div>
 
             {showOverlay && (
               <div className="absolute top-4 right-4 z-10 glass rounded-xl p-4 text-sm">
-                <p className="font-semibold mb-2">Pose Keypoints:</p>
+                <p className="font-semibold mb-2">{isZh ? "姿态关键点：" : "Pose Keypoints:"}</p>
                 <div className="space-y-1 text-muted-foreground">
-                  <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full bg-amber-500"></span> Key Points</div>
-                  <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full bg-red-600"></span> Connections</div>
+                  <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full bg-amber-500"></span>{isZh ? "关键点" : "Key Points"}</div>
+                  <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full bg-red-600"></span>{isZh ? "连接线" : "Connections"}</div>
                 </div>
               </div>
             )}
@@ -224,7 +230,7 @@ export default function Demo() {
           {/* Video Info */}
           <div className="grid md:grid-cols-4 gap-4 mb-10">
             <div className="glass-card p-5 rounded-2xl text-center">
-              <p className="text-sm text-muted-foreground mb-1">Total Frames</p>
+              <p className="text-sm text-muted-foreground mb-1">{isZh ? "总帧数" : "Total Frames"}</p>
               <p className="text-2xl font-bold text-red-600">{poseData?.video_properties?.frame_count || '—'}</p>
             </div>
             <div className="glass-card p-5 rounded-2xl text-center">
@@ -232,11 +238,11 @@ export default function Demo() {
               <p className="text-2xl font-bold text-amber-500">{poseData?.video_properties?.fps || '—'}</p>
             </div>
             <div className="glass-card p-5 rounded-2xl text-center">
-              <p className="text-sm text-muted-foreground mb-1">Resolution</p>
+              <p className="text-sm text-muted-foreground mb-1">{isZh ? "分辨率" : "Resolution"}</p>
               <p className="text-2xl font-bold">{poseData ? `${poseData.video_properties?.width}x${poseData.video_properties?.height}` : '—'}</p>
             </div>
             <div className="glass-card p-5 rounded-2xl text-center">
-              <p className="text-sm text-muted-foreground mb-1">Keypoints</p>
+              <p className="text-sm text-muted-foreground mb-1">{isZh ? "关键点" : "Keypoints"}</p>
               <p className="text-2xl font-bold text-red-600">33</p>
             </div>
           </div>
@@ -249,9 +255,11 @@ export default function Demo() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
                 </svg>
               </div>
-              <h3 className="text-xl font-bold mb-3">Pose Detection</h3>
+              <h3 className="text-xl font-bold mb-3">{isZh ? "姿态检测" : "Pose Detection"}</h3>
               <p className="text-muted-foreground">
-                Our AI tracks 33 key points on your body using MediaPipe to analyze stance, footwork, and movement patterns.
+                {isZh
+                  ? "通过 MediaPipe 跟踪你身体的 33 个关键点，用于分析站姿、步法和动作模式。"
+                  : "Our AI tracks 33 key points on your body using MediaPipe to analyze stance, footwork, and movement patterns."}
               </p>
             </div>
             <div className="group glass-card p-8 rounded-3xl hover-lift transition-all duration-300">
@@ -260,9 +268,11 @@ export default function Demo() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                 </svg>
               </div>
-              <h3 className="text-xl font-bold mb-3">Real-time Feedback</h3>
+              <h3 className="text-xl font-bold mb-3">{isZh ? "实时反馈" : "Real-time Feedback"}</h3>
               <p className="text-muted-foreground">
-                Get instant insights on timing, distance, and technique as you train.
+                {isZh
+                  ? "在训练过程中即时获得关于时机、距离和技术的反馈。"
+                  : "Get instant insights on timing, distance, and technique as you train."}
               </p>
             </div>
             <div className="group glass-card p-8 rounded-3xl hover-lift transition-all duration-300">
@@ -271,9 +281,11 @@ export default function Demo() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                 </svg>
               </div>
-              <h3 className="text-xl font-bold mb-3">Detailed Reports</h3>
+              <h3 className="text-xl font-bold mb-3">{isZh ? "详细报告" : "Detailed Reports"}</h3>
               <p className="text-muted-foreground">
-                Receive comprehensive AI-generated reports with actionable recommendations.
+                {isZh
+                  ? "获取 AI 生成的综合分析报告和可执行建议。"
+                  : "Receive comprehensive AI-generated reports with actionable recommendations."}
               </p>
             </div>
             <div className="group glass-card p-8 rounded-3xl hover-lift transition-all duration-300">
@@ -282,9 +294,11 @@ export default function Demo() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
                 </svg>
               </div>
-              <h3 className="text-xl font-bold mb-3">AI Coach Chat</h3>
+              <h3 className="text-xl font-bold mb-3">{isZh ? "AI 教练对话" : "AI Coach Chat"}</h3>
               <p className="text-muted-foreground">
-                Chat with our AI fencing coach for personalized technique advice and training tips.
+                {isZh
+                  ? "和 AI 击剑教练对话，获取个性化技术建议和训练提示。"
+                  : "Chat with our AI fencing coach for personalized technique advice and training tips."}
               </p>
             </div>
           </div>
@@ -295,7 +309,7 @@ export default function Demo() {
               href="/analyze"
               className="inline-flex items-center gap-3 px-8 py-4 rounded-2xl bg-gradient-to-r from-red-600 to-red-700 text-white font-semibold text-lg hover:shadow-2xl hover:shadow-red-500/30 hover-lift transition-all duration-300"
             >
-              Try It Yourself
+              {isZh ? "立即体验" : "Try It Yourself"}
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
               </svg>

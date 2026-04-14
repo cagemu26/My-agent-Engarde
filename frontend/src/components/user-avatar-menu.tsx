@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type FocusEvent } from "react";
 import type { AuthUser } from "@/lib/auth";
+import { useLocale } from "@/lib/locale";
 
 export interface UserAvatarMenuProps {
   user: Pick<AuthUser, "username" | "email">;
@@ -52,6 +53,7 @@ export function UserAvatarMenu({
   onProfileClick,
   onHistoryClick,
 }: UserAvatarMenuProps) {
+  const { isZh } = useLocale();
   const wrapperRef = useRef<HTMLDivElement>(null);
   const hoverTimerRef = useRef<number | null>(null);
   const menuId = useId();
@@ -201,7 +203,7 @@ export function UserAvatarMenu({
               }}
               className="block rounded-lg px-3 py-2 text-sm text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/50"
             >
-              个人资料
+              {isZh ? "个人资料" : "Profile"}
             </Link>
             <Link
               href={historyHref}
@@ -212,7 +214,7 @@ export function UserAvatarMenu({
               }}
               className="mt-1 block rounded-lg px-3 py-2 text-sm text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/50"
             >
-              个人历史
+              {isZh ? "个人历史" : "History"}
             </Link>
             <button
               type="button"
@@ -223,7 +225,7 @@ export function UserAvatarMenu({
               }}
               className="mt-1 block w-full rounded-lg px-3 py-2 text-left text-sm text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/50"
             >
-              退出登录
+              {isZh ? "退出登录" : "Log out"}
             </button>
           </div>
         </div>

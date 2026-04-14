@@ -60,10 +60,17 @@ class Settings(BaseSettings):
     RAG_CHUNK_SIZE: int = 1400
     RAG_CHUNK_OVERLAP: int = 220
     RAG_EMBED_BATCH_SIZE: int = 16
+    EMBEDDING_PROVIDER: str = "auto"
+    EMBEDDING_TIMEOUT_SECONDS: float = 20.0
 
     QIANFAN_API_BASE: str = "https://qianfan.baidubce.com/v2/embeddings"
     QIANFAN_BEARER_TOKEN: str = ""
     QIANFAN_EMBED_MODEL: str = "qwen3-embedding-4b"
+
+    BAILIAN_API_BASE: str = "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings"
+    BAILIAN_API_KEY: str = ""
+    BAILIAN_EMBED_MODEL: str = "text-embedding-v4"
+    BAILIAN_EMBED_DIMENSIONS: int = 1024
 
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3001", "http://127.0.0.1:3001"]
 
@@ -125,6 +132,14 @@ class Settings(BaseSettings):
         normalized = str(value or "local").strip().lower()
         if normalized not in {"local", "cos"}:
             raise ValueError("STORAGE_PROVIDER must be either 'local' or 'cos'")
+        return normalized
+
+    @field_validator("EMBEDDING_PROVIDER", mode="before")
+    @classmethod
+    def _normalize_embedding_provider(cls, value: Any) -> str:
+        normalized = str(value or "auto").strip().lower()
+        if normalized not in {"auto", "qianfan", "bailian"}:
+            raise ValueError("EMBEDDING_PROVIDER must be one of 'auto', 'qianfan', or 'bailian'")
         return normalized
 
     @field_validator("COS_KEY_PREFIX", "COS_RAW_PREFIX", "COS_DERIVED_PREFIX", mode="before")
