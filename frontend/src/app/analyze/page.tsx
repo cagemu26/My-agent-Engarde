@@ -707,7 +707,7 @@ function AnalyzeContent() {
 
       return summaryLines.join("\n");
     },
-    [],
+    [isZh],
   );
 
   const buildSuggestedPrompts = useCallback((video: HistoryItem) => {
@@ -720,7 +720,7 @@ function AnalyzeContent() {
       "Which movement pattern causes most of my defensive risk?",
       "Give me cue words to remember before my next point.",
     ];
-  }, []);
+  }, [isZh]);
 
   const buildContextArtifacts = useCallback(
     (
@@ -1224,6 +1224,8 @@ function AnalyzeContent() {
       buildContextArtifacts,
       cancelActiveChatStream,
       cancelHistoryDetailRequest,
+      defaultChatOpening,
+      defaultQuickPrompts,
       fetchChatSessions,
       listBackendChatSessions,
       loadBackendChatSessionDetail,
@@ -1308,6 +1310,8 @@ function AnalyzeContent() {
       beginContextTransition,
       cancelActiveChatStream,
       cancelHistoryDetailRequest,
+      defaultChatOpening,
+      defaultQuickPrompts,
       fetchChatSessions,
       loadBackendChatSessionDetail,
       resolveBackendChatSession,
@@ -1585,7 +1589,7 @@ function AnalyzeContent() {
 
       return lines.join("\n");
     },
-    [],
+    [isZh],
   );
 
   const activateVideoChatSession = useCallback(
@@ -1844,7 +1848,14 @@ function AnalyzeContent() {
       window.localStorage.removeItem(TRAINING_HANDOFF_STORAGE_KEY);
       setHasHandledTrainingHandoff(true);
     }
-  }, [fetchChatSessions, hasHandledTrainingHandoff, resolveBackendChatSession, searchParams, syncAnalyzeSessionUrl]);
+  }, [
+    defaultQuickPrompts,
+    fetchChatSessions,
+    hasHandledTrainingHandoff,
+    resolveBackendChatSession,
+    searchParams,
+    syncAnalyzeSessionUrl,
+  ]);
 
   useEffect(() => {
     const videoId = searchParams.get("video");
@@ -2022,7 +2033,13 @@ function AnalyzeContent() {
     setHistoryReportError(null);
 
     syncAnalyzeSessionUrl(null);
-  }, [cancelActiveChatStream, cancelHistoryDetailRequest, syncAnalyzeSessionUrl]);
+  }, [
+    cancelActiveChatStream,
+    cancelHistoryDetailRequest,
+    defaultChatOpening,
+    defaultQuickPrompts,
+    syncAnalyzeSessionUrl,
+  ]);
 
   const handleSelectChatSession = useCallback(
     (sessionId: string) => {
@@ -2877,7 +2894,13 @@ function AnalyzeContent() {
     setPendingAutoQuestion(null);
 
     syncAnalyzeSessionUrl(null);
-  }, [cancelActiveChatStream, cancelHistoryDetailRequest, syncAnalyzeSessionUrl]);
+  }, [
+    cancelActiveChatStream,
+    cancelHistoryDetailRequest,
+    defaultChatOpening,
+    defaultQuickPrompts,
+    syncAnalyzeSessionUrl,
+  ]);
 
   const handleDeleteChatSession = useCallback(
     async (session: ChatSessionRecord) => {
